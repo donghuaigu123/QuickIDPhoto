@@ -1,6 +1,5 @@
 # 快捷证件照（Quick ID Photo）
 
-[![Android CI](https://github.com/donghuaigu123/QuickIDPhoto/actions/workflows/android.yml/badge.svg)](https://github.com/donghuaigu123/QuickIDPhoto/actions/workflows/android.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 **[下载最新 APK](https://github.com/donghuaigu123/QuickIDPhoto/releases/latest)** · **[项目仓库](https://github.com/donghuaigu123/QuickIDPhoto)**
