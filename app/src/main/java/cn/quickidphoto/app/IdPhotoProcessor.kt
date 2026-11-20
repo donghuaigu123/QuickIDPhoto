@@ -38,7 +38,7 @@ class IdPhotoProcessor(context: android.content.Context) {
     private var cacheTop = -1
     private var cacheWidth = -1
     private var cacheHeight = -1
-    private var cacheAlpha: MatteSource? = null
+    private var cacheAlpha: FloatArray? = null
 
     private val detectorOptions = FaceDetectorOptions.Builder()
         .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
@@ -96,10 +96,20 @@ class IdPhotoProcessor(context: android.content.Context) {
             )
         }
         val matte = obtainMatte(source, left, top, width, height, cropped)
+        var working = cropped
+        if (settings.clothingStyle > 0 && face != null) {
+            // 人脸坐标换算到裁剪后的图上，再按脸宽贴合正装图层
+            val scale = cropped.width.toFloat() / width
+            val faceInCrop = FaceBox(
+                (face.left - left) * scale, (face.top - top) * scale,
+                (face.right - left) * scale, (face.bottom - top) * scale
+            )
+            working = ClothingEngine.applyClothing(cropped, matte, faceInCrop, settings)
+        }
         val composited = if (settings.keepOriginalBackground) {
-            cropped
+            working
         } else {
-            replaceBackground(cropped, settings, matte)
+            replaceBackground(working, settings, matte)
         }
         val beautified = applyBeauty(composited, settings)
         val effectiveScale = if (preview) 1 else settings.outputScale.coerceIn(1, 3)
@@ -113,7 +123,7 @@ class IdPhotoProcessor(context: android.content.Context) {
         return output
     }
 
-    private fun replaceBackground(source: Bitmap, settings: EditorSettings, matte: MatteSource): Bitmap {
+    private fun replaceBackground(source: Bitmap, settings: EditorSettings, matte: FloatArray): Bitmap {
         val result = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
         val pixels = IntArray(source.width * source.height)
         source.getPixels(pixels, 0, source.width, 0, 0, source.width, source.height)
@@ -123,7 +133,7 @@ class IdPhotoProcessor(context: android.content.Context) {
         var alpha = FloatArray(source.width * source.height)
         for (y in 0 until source.height) {
             for (x in 0 until source.width) {
-                val confidence = matte.alphaAt(x, y, source.width, source.height)
+                val confidence = matte[y * source.width + x]
                 alpha[y * source.width + x] = ((confidence - threshold + softness) /
                     (2f * softness)).coerceIn(0f, 1f)
             }
@@ -175,31 +185,127 @@ class IdPhotoProcessor(context: android.content.Context) {
         return result
     }
 
-    /** Resolves the raw portrait alpha, preferring MODNet with an ML Kit fallback.
-     *  The matte is cached against the source bitmap and crop rectangle so that
-     *  adjusting sliders only re-runs refinement, not the neural network. */
+    /**
+     * 双引擎融合抠图：MODNet 提供发丝级细节，ML Kit 人像分割提供稳健的身体区域。
+     * 先用两路结果互补融合，再用背景色洪泛清理残留背景、填补内部空洞，
+     * 从根源上解决“背景扣不干净 / 身体边缘被扣掉”的问题。
+     * 结果按源图与裁剪区域缓存，滑块调整只重做精修，不重复推理。
+     */
     private fun obtainMatte(
         source: Bitmap, left: Int, top: Int, width: Int, height: Int, cropped: Bitmap
-    ): MatteSource {
+    ): FloatArray {
         val cached = cacheAlpha
         if (cached != null && cacheSource === source &&
             cacheLeft == left && cacheTop == top &&
             cacheWidth == width && cacheHeight == height) {
             return cached
         }
-        val matte: MatteSource = if (matting.ensureSession()) {
-            matting.matte(cropped)?.let { MatteSource.Modnet(it, ModnetMatting.INPUT_SIZE) }
-                ?: mlkitMatte(cropped)?.let { MatteSource.Full(it) }
-                ?: MatteSource.Full(FloatArray(cropped.width * cropped.height) { 1f })
-        } else {
-            mlkitMatte(cropped)?.let { MatteSource.Full(it) }
-                ?: MatteSource.Full(FloatArray(cropped.width * cropped.height) { 1f })
-        }
+        val modnet = if (matting.ensureSession()) matting.matte(cropped) else null
+        val mlkit = try { mlkitMatte(cropped) } catch (_: Throwable) { null }
+        val fused = fuseAlphas(modnet, mlkit, cropped.width, cropped.height)
+        val pixels = IntArray(cropped.width * cropped.height)
+        cropped.getPixels(pixels, 0, cropped.width, 0, 0, cropped.width, cropped.height)
+        val cleaned = cleanupBackground(fused, pixels, cropped.width, cropped.height)
         cacheSource = source
         cacheLeft = left; cacheTop = top
         cacheWidth = width; cacheHeight = height
-        cacheAlpha = matte
-        return matte
+        cacheAlpha = cleaned
+        return cleaned
+    }
+
+    /** MODNet(低分辨率) 与 ML Kit(全分辨率) 互补融合。 */
+    private fun fuseAlphas(modnet: FloatArray?, mlkit: FloatArray?, width: Int, height: Int): FloatArray {
+        val full = FloatArray(width * height)
+        if (modnet == null && mlkit == null) {
+            java.util.Arrays.fill(full, 1f)
+            return full
+        }
+        val size = ModnetMatting.INPUT_SIZE
+        for (y in 0 until height) {
+            val my = y.toFloat() * (size - 1) / max(1, height - 1)
+            for (x in 0 until width) {
+                val mx = x.toFloat() * (size - 1) / max(1, width - 1)
+                val i = y * width + x
+                val m = if (modnet != null) bilinear(modnet, size, size, mx, my) else -1f
+                val k = if (mlkit != null && i < mlkit.size) mlkit[i] else -1f
+                full[i] = when {
+                    k < 0f -> m
+                    m < 0f -> k
+                    // ML Kit 判定为人体且 MODNet 偏低：提升，修复边缘被扣掉
+                    k > 0.62f && m < k -> min(1f, k * 0.92f + 0.10f)
+                    // MODNet 明显更确信（发丝细节）：保留 MODNet 结果
+                    m > k + 0.28f -> m
+                    // 其余情况取两者较大值，抑制背景残留
+                    else -> max(m, k * 0.88f)
+                }.coerceIn(0f, 1f)
+            }
+        }
+        return full
+    }
+
+    /**
+     * 从图像四周洪泛标记“确定背景”：与背景色相近或极低置信度的连通区域清零，
+     * 而未与边缘连通的低置信度内部区域视为人体空洞并填满，防止身体边缘被吞掉。
+     */
+    private fun cleanupBackground(alpha: FloatArray, pixels: IntArray, width: Int, height: Int): FloatArray {
+        var r = 0.0; var g = 0.0; var b = 0.0; var count = 0
+        fun sample(x: Int, y: Int) {
+            val i = y * width + x
+            if (alpha[i] < 0.4f) {
+                r += Color.red(pixels[i]); g += Color.green(pixels[i]); b += Color.blue(pixels[i])
+                count++
+            }
+        }
+        val stepX = max(1, width / 120)
+        val stepY = max(1, height / 120)
+        for (x in 0 until width step stepX) { sample(x, 0); sample(x, height - 1) }
+        for (y in 0 until height step stepY) { sample(0, y); sample(width - 1, y) }
+        if (count < 24) return alpha
+        val bgR = (r / count).roundToInt()
+        val bgG = (g / count).roundToInt()
+        val bgB = (b / count).roundToInt()
+        val colorThresholdSq = 62 * 62
+
+        fun isBackground(i: Int): Boolean {
+            if (alpha[i] >= 0.72f) return false // 确定前景，严格保护
+            if (alpha[i] < 0.28f) return true
+            val p = pixels[i]
+            val dr = Color.red(p) - bgR
+            val dg = Color.green(p) - bgG
+            val db = Color.blue(p) - bgB
+            return dr * dr + dg * dg + db * db < colorThresholdSq
+        }
+
+        val visited = BooleanArray(alpha.size)
+        val queued = BooleanArray(alpha.size)
+        val queue = IntArray(alpha.size)
+        var head = 0
+        var tail = 0
+        fun enqueue(i: Int) {
+            if (!visited[i] && !queued[i] && isBackground(i)) {
+                queued[i] = true
+                queue[tail++] = i
+            }
+        }
+        for (x in 0 until width) { enqueue(x); enqueue((height - 1) * width + x) }
+        for (y in 0 until height) { enqueue(y * width); enqueue(y * width + width - 1) }
+        while (head < tail) {
+            val i = queue[head++]
+            if (visited[i]) continue
+            visited[i] = true
+            alpha[i] = 0f
+            val x = i % width
+            val y = i / width
+            if (x > 0) enqueue(i - 1)
+            if (x < width - 1) enqueue(i + 1)
+            if (y > 0) enqueue(i - width)
+            if (y < height - 1) enqueue(i + width)
+        }
+        // 内部空洞：未被边缘洪泛触达的低置信度区域补回人体
+        for (i in alpha.indices) {
+            if (!visited[i] && alpha[i] in 0f..0.72f) alpha[i] = 0.85f
+        }
+        return alpha
     }
 
     /** Fallback path using ML Kit selfie segmentation (coarse, only when MODNet is unavailable). */
@@ -228,24 +334,6 @@ class IdPhotoProcessor(context: android.content.Context) {
             null
         } finally {
             segmenter.close()
-        }
-    }
-
-    private sealed class MatteSource {
-        abstract fun alphaAt(x: Int, y: Int, width: Int, height: Int): Float
-
-        /** Alpha defined at full resolution, index = y * width + x. */
-        class Full(private val alpha: FloatArray) : MatteSource() {
-            override fun alphaAt(x: Int, y: Int, width: Int, height: Int): Float = alpha[y * width + x]
-        }
-
-        /** Alpha defined on a square matte of [size]×[size]; bilinear sampling to target size. */
-        class Modnet(private val alpha: FloatArray, private val size: Int) : MatteSource() {
-            override fun alphaAt(x: Int, y: Int, width: Int, height: Int): Float {
-                val mx = x.toFloat() * (size - 1) / max(1, width - 1)
-                val my = y.toFloat() * (size - 1) / max(1, height - 1)
-                return IdPhotoProcessor.bilinear(alpha, size, size, mx, my)
-            }
         }
     }
 

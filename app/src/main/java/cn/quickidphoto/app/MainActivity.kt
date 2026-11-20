@@ -43,8 +43,17 @@ class MainActivity : AppCompatActivity() {
     private var original: BitmapHolder? = null
     private var face: FaceBox? = null
     private var spec = PhotoSpec.presets[0]
-    private var settings = EditorSettings()
+    private var panelSettings = EditorSettings()
     private var preview: EditorPreviewView? = null
+    private var panelBatchMode = false
+    private var batchItems = listOf<BatchItem>()
+    private var batchIndex = 0
+    private var batchPreviewImage: android.widget.ImageView? = null
+    private var batchStatus: TextView? = null
+    private var batchThumbs: LinearLayout? = null
+    private var batchProgress: ProgressBar? = null
+    private var batchRenderJob: Job? = null
+    private var batchVersion = 0
     private var previewStatus: TextView? = null
     private var editorPanel: LinearLayout? = null
     private val editorTabButtons = mutableListOf<MaterialButton>()
@@ -78,6 +87,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun showHome() {
         renderJob?.cancel()
+        batchRenderJob?.cancel()
+        panelBatchMode = false
         val scroll = ScrollView(this)
         val root = vertical(this).apply {
             setPadding(dp(20), dp(22), dp(20), dp(30))
@@ -117,11 +128,12 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(4), dp(22), 0, dp(10))
         })
         root.addView(label(
-            "• MODNet 发丝级 AI 抠图，背景色去污染\n" +
+            "• MODNet + 人像分割双引擎抠图，背景清理与发丝保留\n" +
             "• 15 种规格与自定义像素 / DPI，人脸自动构图\n" +
             "• 纯色 / 渐变 / 透明背景，可视化取色\n" +
+            "• 智能换装：西装 / 衬衫 / 制服自动对齐贴合\n" +
             "• Lanczos-3 高清输出 1x / 2x / 3x，KB 大小限制\n" +
-            "• 美颜、白平衡、五尺寸排版照与裁切线\n\n" +
+            "• 美颜、白平衡、五尺寸排版照与批量预览出片\n\n" +
             "所有照片均在本机处理，不上传服务器。不同机构可能有特殊要求，请以官方最新公告为准。",
             14f, Muted
         ).apply { setLineSpacing(0f, 1.38f); setPadding(dp(6), 0, dp(6), 0) })
@@ -157,7 +169,8 @@ class MainActivity : AppCompatActivity() {
             try {
                 val loaded = withContext(Dispatchers.IO) { PhotoRepository.load(this@MainActivity, uri) }
                 original = BitmapHolder(loaded)
-                settings = EditorSettings()
+                panelSettings = EditorSettings()
+                panelBatchMode = false
                 face = withContext(Dispatchers.IO) { processor.detectLargestFace(loaded) }
                 showEditor()
                 refreshPreview()
@@ -181,9 +194,9 @@ class MainActivity : AppCompatActivity() {
 
         preview = EditorPreviewView(this).apply {
             onGesture = { dx, dy, scale ->
-                settings.horizontalOffset = (settings.horizontalOffset + dx * 0.8f).coerceIn(-0.35f, 0.35f)
-                settings.headTopMargin = (settings.headTopMargin + dy * 0.35f).coerceIn(0.01f, 0.35f)
-                if (scale != 1f) settings.faceScale = (settings.faceScale * scale).coerceIn(0.30f, 0.88f)
+                panelSettings.horizontalOffset = (panelSettings.horizontalOffset + dx * 0.8f).coerceIn(-0.35f, 0.35f)
+                panelSettings.headTopMargin = (panelSettings.headTopMargin + dy * 0.35f).coerceIn(0.01f, 0.35f)
+                if (scale != 1f) panelSettings.faceScale = (panelSettings.faceScale * scale).coerceIn(0.30f, 0.88f)
                 refreshPreview()
             }
         }
@@ -219,7 +232,7 @@ class MainActivity : AppCompatActivity() {
         }
         val row = horizontal(this)
         editorTabButtons.clear()
-        listOf("智能构图", "抠图换底", "美颜精修", "光影调色", "输出排版").forEachIndexed { index, name ->
+        listOf("智能构图", "抠图换底", "美颜精修", "光影调色", "智能换装", "输出排版").forEachIndexed { index, name ->
             val button = action(name) { showEditorTab(index) }
             editorTabButtons.add(button)
             row.addView(button, LinearLayout.LayoutParams(dp(116), dp(48)).apply {
@@ -232,20 +245,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateEditorTabs(selected: Int) {
         editorTabButtons.forEachIndexed { index, button ->
-            if (index == selected) {
-                button.background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
-                    intArrayOf(Primary, PrimaryDeep)).apply { cornerRadius = dp(20).toFloat() }
-                button.setTextColor(Color.WHITE)
-                button.elevation = dp(4).toFloat()
-            } else {
-                button.background = GradientDrawable().apply {
-                    cornerRadius = dp(20).toFloat()
-                    setColor(Color.WHITE)
-                    setStroke(dp(1), Color.rgb(224, 230, 242))
-                }
-                button.setTextColor(Muted)
-                button.elevation = 0f
-            }
+            button.applySelectedStyle(index == selected)
         }
     }
 
@@ -258,7 +258,8 @@ class MainActivity : AppCompatActivity() {
             1 -> backgroundPanel(panel)
             2 -> beautyPanel(panel)
             3 -> tonePanel(panel)
-            4 -> outputPanel(panel)
+            4 -> clothingPanel(panel)
+            5 -> outputPanel(panel)
         }
     }
 
@@ -281,28 +282,30 @@ class MainActivity : AppCompatActivity() {
         specRow.addView(action("自定义") { customSpecDialog() }, LinearLayout.LayoutParams(dp(100), dp(52)))
         panel.addView(specRow)
         panel.addView(sectionTitle("人脸构图微调"))
-        slider(panel, "脸部占照片高度", 30, 88, (settings.faceScale * 100).roundToInt(), "%") {
-            settings.faceScale = it / 100f
+        slider(panel, "脸部占照片高度", 30, 88, (panelSettings.faceScale * 100).roundToInt(), "%") {
+            panelSettings.faceScale = it / 100f
         }
-        slider(panel, "头顶留白", 1, 35, (settings.headTopMargin * 100).roundToInt(), "%") {
-            settings.headTopMargin = it / 100f
+        slider(panel, "头顶留白", 1, 35, (panelSettings.headTopMargin * 100).roundToInt(), "%") {
+            panelSettings.headTopMargin = it / 100f
         }
-        slider(panel, "水平位置", -35, 35, (settings.horizontalOffset * 100).roundToInt(), "%") {
-            settings.horizontalOffset = it / 100f
+        slider(panel, "水平位置", -35, 35, (panelSettings.horizontalOffset * 100).roundToInt(), "%") {
+            panelSettings.horizontalOffset = it / 100f
         }
         val row = horizontal(this)
         row.addView(action("重新检测") { redetectFace() }, LinearLayout.LayoutParams(0, dp(48), 1f))
         row.addView(action("重置构图") {
-            settings.faceScale = 0.57f; settings.headTopMargin = 0.10f; settings.horizontalOffset = 0f
+            panelSettings.faceScale = 0.57f; panelSettings.headTopMargin = 0.10f; panelSettings.horizontalOffset = 0f
             showEditorTab(0); refreshPreview()
         }, LinearLayout.LayoutParams(0, dp(48), 1f))
         row.addView(action("三分线") { preview?.showGrid = !(preview?.showGrid ?: false) }, LinearLayout.LayoutParams(0, dp(48), 1f))
         panel.addView(row)
-        val transformRow = horizontal(this)
-        transformRow.addView(action("左旋 90°") { transformSource(-90f, false) }, LinearLayout.LayoutParams(0, dp(46), 1f))
-        transformRow.addView(action("右旋 90°") { transformSource(90f, false) }, LinearLayout.LayoutParams(0, dp(46), 1f))
-        transformRow.addView(action("水平镜像") { transformSource(0f, true) }, LinearLayout.LayoutParams(0, dp(46), 1f))
-        panel.addView(transformRow)
+        if (!panelBatchMode) {
+            val transformRow = horizontal(this)
+            transformRow.addView(action("左旋 90°") { transformSource(-90f, false) }, LinearLayout.LayoutParams(0, dp(46), 1f))
+            transformRow.addView(action("右旋 90°") { transformSource(90f, false) }, LinearLayout.LayoutParams(0, dp(46), 1f))
+            transformRow.addView(action("水平镜像") { transformSource(0f, true) }, LinearLayout.LayoutParams(0, dp(46), 1f))
+            panel.addView(transformRow)
+        }
     }
 
     private fun backgroundPanel(panel: LinearLayout) {
@@ -311,20 +314,20 @@ class MainActivity : AppCompatActivity() {
         val scroll = HorizontalScrollView(this)
         val row = horizontal(this)
         colors.forEach { (name, color) ->
-            row.addView(chip(name, !settings.keepOriginalBackground && !settings.transparentBackground &&
-                !settings.gradientBackground && settings.backgroundColor == color) {
-                settings.keepOriginalBackground = name == "保留原背景"
-                settings.transparentBackground = false
-                settings.gradientBackground = false
-                if (!settings.keepOriginalBackground) settings.backgroundColor = color
+            row.addView(chip(name, !panelSettings.keepOriginalBackground && !panelSettings.transparentBackground &&
+                !panelSettings.gradientBackground && panelSettings.backgroundColor == color) {
+                panelSettings.keepOriginalBackground = name == "保留原背景"
+                panelSettings.transparentBackground = false
+                panelSettings.gradientBackground = false
+                if (!panelSettings.keepOriginalBackground) panelSettings.backgroundColor = color
                 showEditorTab(1); refreshPreview()
             }, LinearLayout.LayoutParams(dp(104), dp(48)))
         }
-        row.addView(chip("透明 PNG", settings.transparentBackground) {
-            settings.keepOriginalBackground = false
-            settings.transparentBackground = true
-            settings.gradientBackground = false
-            settings.png = true
+        row.addView(chip("透明 PNG", panelSettings.transparentBackground) {
+            panelSettings.keepOriginalBackground = false
+            panelSettings.transparentBackground = true
+            panelSettings.gradientBackground = false
+            panelSettings.png = true
             showEditorTab(1); refreshPreview()
         }, LinearLayout.LayoutParams(dp(112), dp(48)))
         row.addView(action("自定义颜色") { customColorDialog() }, LinearLayout.LayoutParams(dp(120), dp(48)))
@@ -341,13 +344,13 @@ class MainActivity : AppCompatActivity() {
             "青绿" to (Color.rgb(26, 188, 156) to Color.rgb(168, 233, 208))
         )
         gradients.forEach { (name, pair) ->
-            gradientButtons.addView(chip(name, settings.gradientBackground &&
-                settings.gradientStart == pair.first && settings.gradientEnd == pair.second) {
-                settings.keepOriginalBackground = false
-                settings.transparentBackground = false
-                settings.gradientBackground = true
-                settings.gradientStart = pair.first
-                settings.gradientEnd = pair.second
+            gradientButtons.addView(chip(name, panelSettings.gradientBackground &&
+                panelSettings.gradientStart == pair.first && panelSettings.gradientEnd == pair.second) {
+                panelSettings.keepOriginalBackground = false
+                panelSettings.transparentBackground = false
+                panelSettings.gradientBackground = true
+                panelSettings.gradientStart = pair.first
+                panelSettings.gradientEnd = pair.second
                 showEditorTab(1); refreshPreview()
             }, LinearLayout.LayoutParams(dp(116), dp(48)))
         }
@@ -357,9 +360,9 @@ class MainActivity : AppCompatActivity() {
 
         panel.addView(sectionTitle("边缘细节"))
 
-        slider(panel, "边缘柔化", 0, 100, settings.edgeFeather, "") { settings.edgeFeather = it }
-        slider(panel, "轮廓收缩 / 扩展", -50, 50, settings.edgeShift, "") { settings.edgeShift = it }
-        slider(panel, "发丝细节保留", 0, 100, settings.hairDetail, "") { settings.hairDetail = it }
+        slider(panel, "边缘柔化", 0, 100, panelSettings.edgeFeather, "") { panelSettings.edgeFeather = it }
+        slider(panel, "轮廓收缩 / 扩展", -50, 50, panelSettings.edgeShift, "") { panelSettings.edgeShift = it }
+        slider(panel, "发丝细节保留", 0, 100, panelSettings.hairDetail, "") { panelSettings.hairDetail = it }
         panel.addView(label("发丝细节越高，头发边缘越锐利通透；柔化则让过渡更自然。透明背景请使用 PNG。", 12f, Muted))
     }
 
@@ -367,18 +370,18 @@ class MainActivity : AppCompatActivity() {
         panel.addView(sectionTitle("快速预设"))
         val presets = horizontal(this)
         fun isPreset(s: Int, w: Int, r: Int, sh: Int) =
-            settings.smooth == s && settings.whiten == w && settings.rosy == r && settings.sharpen == sh
+            panelSettings.smooth == s && panelSettings.whiten == w && panelSettings.rosy == r && panelSettings.sharpen == sh
         presets.addView(chip("自然", isPreset(28, 14, 8, 14)) { applyBeautyPreset(28, 14, 8, 14) }, LinearLayout.LayoutParams(0, dp(48), 1f))
         presets.addView(chip("清透", isPreset(48, 26, 14, 22)) { applyBeautyPreset(48, 26, 14, 22) }, LinearLayout.LayoutParams(0, dp(48), 1f))
         presets.addView(chip("精致", isPreset(68, 36, 22, 30)) { applyBeautyPreset(68, 36, 22, 30) }, LinearLayout.LayoutParams(0, dp(48), 1f))
         presets.addView(chip("重置", isPreset(0, 0, 0, 0)) { applyBeautyPreset(0, 0, 0, 0) }, LinearLayout.LayoutParams(0, dp(48), 1f))
         panel.addView(presets)
         panel.addView(sectionTitle("手动微调"))
-        slider(panel, "美颜总强度", 0, 100, settings.beautyIntensity, "%") { settings.beautyIntensity = it }
-        slider(panel, "皮肤平滑（保留非皮肤区域）", 0, 100, settings.smooth, "") { settings.smooth = it }
-        slider(panel, "肤色提亮", 0, 100, settings.whiten, "") { settings.whiten = it }
-        slider(panel, "气色红润", 0, 100, settings.rosy, "") { settings.rosy = it }
-        slider(panel, "细节锐化", 0, 100, settings.sharpen, "") { settings.sharpen = it }
+        slider(panel, "美颜总强度", 0, 100, panelSettings.beautyIntensity, "%") { panelSettings.beautyIntensity = it }
+        slider(panel, "皮肤平滑（保留非皮肤区域）", 0, 100, panelSettings.smooth, "") { panelSettings.smooth = it }
+        slider(panel, "肤色提亮", 0, 100, panelSettings.whiten, "") { panelSettings.whiten = it }
+        slider(panel, "气色红润", 0, 100, panelSettings.rosy, "") { panelSettings.rosy = it }
+        slider(panel, "细节锐化", 0, 100, panelSettings.sharpen, "") { panelSettings.sharpen = it }
         panel.addView(label("建议适度美颜；正式证件照不得改变五官和真实面貌。", 12f, Muted))
     }
 
@@ -387,62 +390,64 @@ class MainActivity : AppCompatActivity() {
         val row = horizontal(this)
         row.addView(action("自动白平衡") { autoWhiteBalance() }, LinearLayout.LayoutParams(0, dp(48), 1f))
         row.addView(action("自然增强") {
-            settings.brightness = 6; settings.contrast = 8; settings.saturation = 4
+            panelSettings.brightness = 6; panelSettings.contrast = 8; panelSettings.saturation = 4
             showEditorTab(3); refreshPreview()
         }, LinearLayout.LayoutParams(0, dp(48), 1f))
         row.addView(action("全部归零") {
-            settings.brightness = 0; settings.contrast = 0; settings.saturation = 0
-            settings.temperature = 0; settings.tint = 0; settings.shadows = 0; settings.highlights = 0
+            panelSettings.brightness = 0; panelSettings.contrast = 0; panelSettings.saturation = 0
+            panelSettings.temperature = 0; panelSettings.tint = 0; panelSettings.shadows = 0; panelSettings.highlights = 0
             showEditorTab(3); refreshPreview()
         }, LinearLayout.LayoutParams(0, dp(48), 1f))
         panel.addView(row)
         panel.addView(sectionTitle("光影参数"))
-        slider(panel, "亮度", -100, 100, settings.brightness, "") { settings.brightness = it }
-        slider(panel, "对比度", -100, 100, settings.contrast, "") { settings.contrast = it }
-        slider(panel, "饱和度", -100, 100, settings.saturation, "") { settings.saturation = it }
-        slider(panel, "色温（冷 ↔ 暖）", -100, 100, settings.temperature, "") { settings.temperature = it }
-        slider(panel, "色调（绿 ↔ 品红）", -100, 100, settings.tint, "") { settings.tint = it }
-        slider(panel, "阴影", -100, 100, settings.shadows, "") { settings.shadows = it }
-        slider(panel, "高光", -100, 100, settings.highlights, "") { settings.highlights = it }
+        slider(panel, "亮度", -100, 100, panelSettings.brightness, "") { panelSettings.brightness = it }
+        slider(panel, "对比度", -100, 100, panelSettings.contrast, "") { panelSettings.contrast = it }
+        slider(panel, "饱和度", -100, 100, panelSettings.saturation, "") { panelSettings.saturation = it }
+        slider(panel, "色温（冷 ↔ 暖）", -100, 100, panelSettings.temperature, "") { panelSettings.temperature = it }
+        slider(panel, "色调（绿 ↔ 品红）", -100, 100, panelSettings.tint, "") { panelSettings.tint = it }
+        slider(panel, "阴影", -100, 100, panelSettings.shadows, "") { panelSettings.shadows = it }
+        slider(panel, "高光", -100, 100, panelSettings.highlights, "") { panelSettings.highlights = it }
     }
 
     private fun outputPanel(panel: LinearLayout) {
-        val scale = settings.outputScale.coerceIn(1, 3)
+        val scale = panelSettings.outputScale.coerceIn(1, 3)
         panel.addView(label("${spec.name} · 输出 ${spec.widthPx * scale}×${spec.heightPx * scale}px · ${spec.dpi * scale} DPI", 15f))
         panel.addView(sectionTitle("高清倍率"))
         val hd = horizontal(this)
         listOf(1 to "标准 1x", 2 to "高清 2x", 3 to "超清 3x").forEach { (value, name) ->
-            hd.addView(chip(name, settings.outputScale == value) {
-                settings.outputScale = value; showEditorTab(4)
+            hd.addView(chip(name, panelSettings.outputScale == value) {
+                panelSettings.outputScale = value; showEditorTab(5)
             }, LinearLayout.LayoutParams(0, dp(48), 1f))
         }
         panel.addView(hd)
         panel.addView(label("高清倍率在标准尺寸基础上放大输出，Lanczos-3 重采样保留细节。", 12f, Muted))
         panel.addView(sectionTitle("格式与保存"))
         val format = horizontal(this)
-        format.addView(chip("JPG", !settings.png) { settings.png = false; showEditorTab(4) }, LinearLayout.LayoutParams(0, dp(48), 1f))
-        format.addView(chip("PNG", settings.png) { settings.png = true; showEditorTab(4) }, LinearLayout.LayoutParams(0, dp(48), 1f))
-        format.addView(primaryAction("保存到相册") { savePhoto() }, LinearLayout.LayoutParams(0, dp(48), 1.4f))
+        format.addView(chip("JPG", !panelSettings.png) { panelSettings.png = false; showEditorTab(5) }, LinearLayout.LayoutParams(0, dp(48), 1f))
+        format.addView(chip("PNG", panelSettings.png) { panelSettings.png = true; showEditorTab(5) }, LinearLayout.LayoutParams(0, dp(48), 1f))
+        format.addView(primaryAction(if (panelBatchMode) "批量保存" else "保存到相册") {
+            if (panelBatchMode) startBatchSave() else savePhoto()
+        }, LinearLayout.LayoutParams(0, dp(48), 1.4f))
         panel.addView(format)
-        slider(panel, "JPG 质量", 60, 100, settings.jpegQuality, "") { settings.jpegQuality = it }
-        slider(panel, "文件大小上限", 0, 1024, settings.targetKb, " KB") { settings.targetKb = it }
+        slider(panel, "JPG 质量", 60, 100, panelSettings.jpegQuality, "") { panelSettings.jpegQuality = it }
+        slider(panel, "文件大小上限", 0, 1024, panelSettings.targetKb, " KB") { panelSettings.targetKb = it }
         panel.addView(label("大小上限仅对 JPG 生效；设为 0 表示不限制。报名系统要求 20–200KB 时可直接设置。", 12f, Muted))
         panel.addView(sectionTitle("排版照（300DPI 含裁切线）"))
         val layoutRow = HorizontalScrollView(this)
         val layoutButtons = horizontal(this)
         LayoutSheetGenerator.layouts.forEachIndexed { index, layout ->
-            layoutButtons.addView(chip(layout.first, settings.printLayout == index) {
-                settings.printLayout = index
-                showEditorTab(4)
+            layoutButtons.addView(chip(layout.first, panelSettings.printLayout == index) {
+                panelSettings.printLayout = index
+                showEditorTab(5)
             }, LinearLayout.LayoutParams(dp(110), dp(48)))
         }
         layoutRow.addView(layoutButtons)
         panel.addView(layoutRow)
         val printBg = horizontal(this)
         listOf("排版白底" to Color.WHITE, "排版浅灰" to Color.rgb(238, 240, 244), "排版米白" to Color.rgb(250, 246, 238)).forEach { (name, color) ->
-            printBg.addView(chip(name, settings.printBackgroundColor == color) {
-                settings.printBackgroundColor = color
-                showEditorTab(4)
+            printBg.addView(chip(name, panelSettings.printBackgroundColor == color) {
+                panelSettings.printBackgroundColor = color
+                showEditorTab(5)
             }, LinearLayout.LayoutParams(0, dp(46), 1f))
         }
         panel.addView(printBg)
@@ -451,6 +456,60 @@ class MainActivity : AppCompatActivity() {
         export.addView(action("分享成品") { shareLastSaved() }, LinearLayout.LayoutParams(0, dp(50), 1f))
         panel.addView(export)
         panel.addView(label("六寸排版为 1800×1200px / 300DPI，含裁切辅助线。打印时请关闭“适应页面”，选择原始尺寸。", 12f, Color.GRAY))
+    }
+
+    private fun clothingPanel(panel: LinearLayout) {
+        panel.addView(sectionTitle("换装样式（按人脸位置自动贴合）"))
+        val styleScroll = HorizontalScrollView(this)
+        val styleRow = horizontal(this)
+        ClothingEngine.styles.forEachIndexed { index, style ->
+            styleRow.addView(chip(style.name, panelSettings.clothingStyle == index) {
+                panelSettings.clothingStyle = index
+                if (index > 0) panelSettings.clothingColor = style.defaultColor
+                showEditorTab(4); refreshPreview()
+            }, LinearLayout.LayoutParams(dp(112), dp(48)))
+        }
+        styleScroll.addView(styleRow)
+        panel.addView(styleScroll)
+        if (panelSettings.clothingStyle > 0) {
+            panel.addView(sectionTitle("服装颜色"))
+            val colorScroll = HorizontalScrollView(this)
+            val colorRow = horizontal(this)
+            val palette = listOf(
+                "黑色" to Color.rgb(35, 38, 48),
+                "藏青" to Color.rgb(38, 52, 84),
+                "深灰" to Color.rgb(72, 78, 90),
+                "白色" to Color.rgb(244, 246, 250),
+                "商务蓝" to Color.rgb(126, 164, 218),
+                "酒红" to Color.rgb(120, 42, 52)
+            )
+            palette.forEach { (name, color) ->
+                colorRow.addView(chip(name, panelSettings.clothingColor == color) {
+                    panelSettings.clothingColor = color
+                    showEditorTab(4); refreshPreview()
+                }, LinearLayout.LayoutParams(dp(96), dp(48)))
+            }
+            colorRow.addView(action("自定义") { customClothingColorDialog() }, LinearLayout.LayoutParams(dp(100), dp(48)))
+            colorScroll.addView(colorRow)
+            panel.addView(colorScroll)
+        }
+        panel.addView(label("正装素材在本地实时生成，领口自动对齐下巴与肩线；如人物已穿着正装可不换装。", 12f, Muted))
+    }
+
+    private fun customClothingColorDialog() {
+        val picker = VisualColorPickerView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(-1, dp(340))
+            setColor(panelSettings.clothingColor)
+        }
+        val container = FrameLayout(this).apply {
+            setPadding(dp(18), dp(6), dp(18), 0)
+            addView(picker)
+        }
+        AlertDialog.Builder(this).setTitle("选择服装颜色").setView(container)
+            .setPositiveButton("应用") { _, _ ->
+                panelSettings.clothingColor = picker.selectedColor
+                showEditorTab(4); refreshPreview()
+            }.setNegativeButton("取消", null).show()
     }
 
     private fun slider(
@@ -477,15 +536,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshPreview() {
+        if (panelBatchMode) { refreshBatchPreview(); return }
         val source = original?.bitmap ?: return
         val targetPreview = preview ?: return
         val version = ++renderVersion
         renderJob?.cancel()
         renderJob = lifecycleScope.launch {
-            delay(if (settings.keepOriginalBackground) 50 else 180)
+            delay(if (panelSettings.keepOriginalBackground) 50 else 180)
             try {
                 val output = withContext(Dispatchers.Default) {
-                    processor.render(source, spec, settings.copyValues(), face, preview = true)
+                    processor.render(source, spec, panelSettings.copyValues(), face, preview = true)
                 }
                 if (version == renderVersion) {
                     rendered = output
@@ -500,6 +560,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun redetectFace() {
+        if (panelBatchMode) {
+            val item = batchItems.getOrNull(batchIndex) ?: return
+            val source = item.bitmap ?: return
+            lifecycleScope.launch {
+                item.face = withContext(Dispatchers.IO) {
+                    try { processor.detectLargestFace(source) } catch (_: Throwable) { null }
+                }
+                batchStatus?.text = if (item.face == null) "未检测到人脸，请用其他设置微调构图" else "第 ${batchIndex + 1} 张人脸已重新定位"
+                refreshPreview()
+            }
+            return
+        }
         val source = original?.bitmap ?: return
         previewStatus?.text = "正在重新检测人脸…"
         lifecycleScope.launch {
@@ -524,15 +596,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun applyBeautyPreset(smooth: Int, whiten: Int, rosy: Int, sharpen: Int) {
-        settings.smooth = smooth; settings.whiten = whiten; settings.rosy = rosy; settings.sharpen = sharpen
+        panelSettings.smooth = smooth; panelSettings.whiten = whiten; panelSettings.rosy = rosy; panelSettings.sharpen = sharpen
         showEditorTab(2); refreshPreview()
     }
 
     private fun autoWhiteBalance() {
-        val source = original?.bitmap ?: return
+        val source = if (panelBatchMode) batchItems.getOrNull(batchIndex)?.bitmap else original?.bitmap
+        source ?: return
         lifecycleScope.launch {
             val result = withContext(Dispatchers.Default) { processor.suggestWhiteBalance(source) }
-            settings.temperature = result.first; settings.tint = result.second
+            panelSettings.temperature = result.first; panelSettings.tint = result.second
             showEditorTab(3); refreshPreview()
         }
     }
@@ -561,7 +634,7 @@ class MainActivity : AppCompatActivity() {
     private fun customColorDialog() {
         val picker = VisualColorPickerView(this).apply {
             layoutParams = FrameLayout.LayoutParams(-1, dp(360))
-            setColor(if (settings.keepOriginalBackground) Color.rgb(67, 142, 219) else settings.backgroundColor)
+            setColor(if (panelSettings.keepOriginalBackground) Color.rgb(67, 142, 219) else panelSettings.backgroundColor)
         }
         val container = FrameLayout(this).apply {
             setPadding(dp(18), dp(6), dp(18), 0)
@@ -569,9 +642,9 @@ class MainActivity : AppCompatActivity() {
         }
         AlertDialog.Builder(this).setTitle("可视化选择背景颜色").setView(container)
             .setPositiveButton("应用") { _, _ ->
-                settings.backgroundColor = picker.selectedColor
-                settings.keepOriginalBackground = false
-                settings.transparentBackground = false
+                panelSettings.backgroundColor = picker.selectedColor
+                panelSettings.keepOriginalBackground = false
+                panelSettings.transparentBackground = false
                 refreshPreview()
             }.setNegativeButton("取消", null).show()
     }
@@ -580,11 +653,11 @@ class MainActivity : AppCompatActivity() {
     private fun customGradientDialog() {
         val topPicker = VisualColorPickerView(this).apply {
             layoutParams = LinearLayout.LayoutParams(-1, dp(300))
-            setColor(settings.gradientStart)
+            setColor(panelSettings.gradientStart)
         }
         val bottomPicker = VisualColorPickerView(this).apply {
             layoutParams = LinearLayout.LayoutParams(-1, dp(300))
-            setColor(settings.gradientEnd)
+            setColor(panelSettings.gradientEnd)
         }
         val form = vertical(this).apply {
             setPadding(dp(18), dp(6), dp(18), 0)
@@ -595,11 +668,11 @@ class MainActivity : AppCompatActivity() {
         }
         AlertDialog.Builder(this).setTitle("自定义渐变背景").setView(form)
             .setPositiveButton("应用") { _, _ ->
-                settings.keepOriginalBackground = false
-                settings.transparentBackground = false
-                settings.gradientBackground = true
-                settings.gradientStart = topPicker.selectedColor
-                settings.gradientEnd = bottomPicker.selectedColor
+                panelSettings.keepOriginalBackground = false
+                panelSettings.transparentBackground = false
+                panelSettings.gradientBackground = true
+                panelSettings.gradientStart = topPicker.selectedColor
+                panelSettings.gradientEnd = bottomPicker.selectedColor
                 refreshPreview()
             }.setNegativeButton("取消", null).show()
     }
@@ -629,8 +702,8 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
-                    val output = processor.render(source, spec, settings.copyValues(), face)
-                    val uri = PhotoRepository.save(this@MainActivity, output, spec, settings)
+                    val output = processor.render(source, spec, panelSettings.copyValues(), face)
+                    val uri = PhotoRepository.save(this@MainActivity, output, spec, panelSettings)
                     output to uri
                 }
                 rendered = result.first
@@ -653,11 +726,11 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             try {
                 val uri = withContext(Dispatchers.IO) {
-                    val output = processor.render(source, spec, settings.copyValues(), face)
-                    val layout = LayoutSheetGenerator.layouts[settings.printLayout.coerceIn(0, LayoutSheetGenerator.layouts.lastIndex)]
-                    val sheet = LayoutSheetGenerator.generate(output, settings.printLayout, settings.printBackgroundColor)
+                    val output = processor.render(source, spec, panelSettings.copyValues(), face)
+                    val layout = LayoutSheetGenerator.layouts[panelSettings.printLayout.coerceIn(0, LayoutSheetGenerator.layouts.lastIndex)]
+                    val sheet = LayoutSheetGenerator.generate(output, panelSettings.printLayout, panelSettings.printBackgroundColor)
                     val sheetSpec = PhotoSpec("${layout.first}排版", layout.second * 25.4f / 300, layout.third * 25.4f / 300, layout.second, layout.third)
-                    PhotoRepository.save(this@MainActivity, sheet, sheetSpec, settings)
+                    PhotoRepository.save(this@MainActivity, sheet, sheetSpec, panelSettings)
                 }
                 lastSaved = uri
                 Toast.makeText(this@MainActivity, "排版照已保存到相册", Toast.LENGTH_LONG).show()
@@ -674,85 +747,187 @@ class MainActivity : AppCompatActivity() {
             return
         }
         startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
-            type = if (settings.png || settings.transparentBackground) "image/png" else "image/jpeg"
+            type = if (panelSettings.png || panelSettings.transparentBackground) "image/png" else "image/jpeg"
             putExtra(Intent.EXTRA_STREAM, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }, "分享证件照"))
     }
 
     private fun showBatch(uris: List<Uri>) {
-        val root = vertical(this).apply {
-            setPadding(dp(18), dp(18), dp(18), dp(18))
-            setBackgroundColor(Color.rgb(247, 248, 252))
-        }
-        val toolbar = horizontal(this)
-        toolbar.addView(action("‹ 首页") { showHome() }, LinearLayout.LayoutParams(0, dp(54), 1f))
-        toolbar.addView(label("批量制作 · ${uris.size} 张", 20f).apply { gravity = Gravity.CENTER },
-            LinearLayout.LayoutParams(0, dp(54), 2f))
-        toolbar.addView(View(this), LinearLayout.LayoutParams(0, dp(54), 1f))
+        renderJob?.cancel()
+        batchRenderJob?.cancel()
+        batchItems = uris.map { BatchItem(it) }
+        batchIndex = 0
+        batchVersion++
+        panelBatchMode = true
+        panelSettings = EditorSettings(keepOriginalBackground = false)
+        spec = PhotoSpec.presets[0]
+
+        val root = vertical(this).apply { setBackgroundColor(Surface) }
+        val toolbar = horizontal(this).apply { setPadding(dp(10), dp(8), dp(10), dp(6)) }
+        toolbar.addView(action("‹ 首页") { showHome() }, LinearLayout.LayoutParams(0, dp(52), 1f))
+        toolbar.addView(label("批量制作 · ${uris.size} 张", 18f, Ink).apply {
+            gravity = Gravity.CENTER
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+        }, LinearLayout.LayoutParams(0, dp(52), 2f))
+        toolbar.addView(primaryAction("开始出片") { startBatchSave() }, LinearLayout.LayoutParams(0, dp(52), 1.25f))
         root.addView(toolbar)
-        root.addView(label("每张照片将独立检测人脸并自动构图，统一应用以下参数。", 13f, Color.GRAY))
-        val spinner = Spinner(this)
-        spinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item,
-            PhotoSpec.presets.map { "${it.name} · ${it.widthPx}×${it.heightPx}" })
-        root.addView(spinner, LinearLayout.LayoutParams(-1, dp(56)))
-        val backgrounds = listOf("纯白", "证件蓝", "标准蓝", "证件红", "浅灰", "保留原背景")
-        val bgSpinner = Spinner(this)
-        bgSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, backgrounds)
-        root.addView(label("统一背景", 13f))
-        root.addView(bgSpinner, LinearLayout.LayoutParams(-1, dp(52)))
-        val batchSettings = EditorSettings(keepOriginalBackground = false)
-        bgSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                batchSettings.keepOriginalBackground = position == backgrounds.lastIndex
-                if (!batchSettings.keepOriginalBackground) {
-                    batchSettings.backgroundColor = PhotoSpec.backgroundColors[position].second
-                }
-            }
-            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+
+        // 大图预览区：点击缩略图或调整参数后自动刷新
+        val previewArea = FrameLayout(this).apply { setBackgroundColor(Color.rgb(18, 22, 36)) }
+        batchPreviewImage = android.widget.ImageView(this).apply {
+            scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+            adjustViewBounds = true
         }
-        slider(root, "脸部占照片高度", 30, 88, 57, "%") { batchSettings.faceScale = it / 100f }
-        slider(root, "头顶留白", 1, 35, 10, "%") { batchSettings.headTopMargin = it / 100f }
-        val beauty = Switch(this).apply { text = "自然美颜与轻微锐化"; isChecked = true }
-        root.addView(beauty)
-        val progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+        previewArea.addView(batchPreviewImage, FrameLayout.LayoutParams(-1, -1))
+        root.addView(previewArea, LinearLayout.LayoutParams(-1, 0, 1f))
+
+        batchStatus = label("正在读取照片…", 12f, Muted).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+        }
+        root.addView(batchStatus)
+
+        val thumbScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+        }
+        batchThumbs = horizontal(this)
+        thumbScroll.addView(batchThumbs)
+        root.addView(thumbScroll, LinearLayout.LayoutParams(-1, dp(92)))
+
+        batchProgress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             max = uris.size
         }
-        root.addView(progress, LinearLayout.LayoutParams(-1, dp(20)))
-        val status = label("等待开始", 14f, Color.GRAY).apply {
-            setPadding(0, dp(12), 0, dp(12))
+        root.addView(batchProgress, LinearLayout.LayoutParams(-1, dp(14)).apply {
+            leftMargin = dp(12); rightMargin = dp(12)
+        })
+
+        // 与单张制作完全相同的 6 组设置面板，批量统一应用到每一张照片
+        root.addView(editorTabs())
+        editorPanel = vertical(this).apply { setPadding(dp(16), dp(10), dp(16), dp(12)) }
+        val panelScroll = ScrollView(this).apply { addView(editorPanel) }
+        val panelCard = MaterialCardView(this).apply {
+            radius = dp(26).toFloat()
+            cardElevation = dp(3).toFloat()
+            setCardBackgroundColor(Color.WHITE)
+            strokeColor = Color.rgb(230, 235, 245)
+            strokeWidth = dp(1)
+            addView(panelScroll)
         }
-        root.addView(status)
-        root.addView(action("开始批量处理") {
-            withStoragePermission {
-            it.isEnabled = false
-            lifecycleScope.launch {
-                var success = 0
-                var failed = 0
-                uris.forEachIndexed { index, uri ->
-                    status.text = "正在处理 ${index + 1}/${uris.size}"
+        root.addView(panelCard, LinearLayout.LayoutParams(-1, dp(230)).apply {
+            leftMargin = dp(10); rightMargin = dp(10); bottomMargin = dp(8)
+        })
+        setContentView(root)
+        showEditorTab(0)
+
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) {
+                batchItems.forEach { item ->
                     try {
-                        withContext(Dispatchers.IO) {
-                            val bitmap = PhotoRepository.load(this@MainActivity, uri)
-                            val detected = processor.detectLargestFace(bitmap)
-                            val currentSpec = PhotoSpec.presets[spinner.selectedItemPosition]
-                            batchSettings.smooth = if (beauty.isChecked) 20 else 0
-                            batchSettings.whiten = if (beauty.isChecked) 8 else 0
-                            batchSettings.sharpen = if (beauty.isChecked) 10 else 0
-                            val output = processor.render(bitmap, currentSpec, batchSettings.copyValues(), detected)
-                            PhotoRepository.save(this@MainActivity, output, currentSpec, batchSettings,
-                                "%02d".format(index + 1))
-                        }
-                        success++
-                    } catch (_: Throwable) { failed++ }
-                    progress.progress = index + 1
+                        val bitmap = PhotoRepository.load(this@MainActivity, item.uri, 1600)
+                        item.bitmap = bitmap
+                        item.face = processor.detectLargestFace(bitmap)
+                    } catch (error: Throwable) {
+                        item.status = "读取失败：${error.message}"
+                    }
+                    withContext(Dispatchers.Main) {
+                        batchStatus?.text = "已载入 ${batchItems.count { it.bitmap != null }}/${batchItems.size} 张 · 点击缩略图切换预览"
+                    }
                 }
-                status.text = "完成：成功 $success 张，失败 $failed 张\n保存位置：Pictures/快捷证件照"
-                Toast.makeText(this@MainActivity, "批量处理完成", Toast.LENGTH_LONG).show()
             }
+            rebuildBatchThumbs()
+            refreshPreview()
+        }
+    }
+
+    private fun refreshBatchPreview() {
+        val item = batchItems.getOrNull(batchIndex) ?: return
+        val source = item.bitmap ?: run {
+            batchStatus?.text = "此照片读取失败，请返回重新选择"
+            return
+        }
+        val version = ++batchVersion
+        batchRenderJob?.cancel()
+        batchStatus?.text = "正在预览第 ${batchIndex + 1} 张…"
+        batchRenderJob = lifecycleScope.launch {
+            delay(if (panelSettings.keepOriginalBackground) 30 else 120)
+            try {
+                val output = withContext(Dispatchers.Default) {
+                    processor.render(source, spec, panelSettings.copyValues(), item.face, preview = true)
+                }
+                if (version == batchVersion) {
+                    item.previewResult = output
+                    batchPreviewImage?.setImageBitmap(output)
+                    batchStatus?.text = "预览第 ${batchIndex + 1}/${batchItems.size} 张 · 修改设置后自动刷新 · 可点击缩略图切换"
+                    rebuildBatchThumbs()
+                }
+            } catch (error: Throwable) {
+                if (version == batchVersion) batchStatus?.text = "预览失败：${error.message}"
             }
-        }, LinearLayout.LayoutParams(-1, dp(58)))
-        setContentView(ScrollView(this).apply { addView(root) })
+        }
+    }
+
+    private fun rebuildBatchThumbs() {
+        val row = batchThumbs ?: return
+        row.removeAllViews()
+        batchItems.forEachIndexed { index, item ->
+            val thumb = android.widget.ImageView(this).apply {
+                scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
+                setBackgroundColor(if (index == batchIndex) Color.rgb(99, 122, 255) else Color.rgb(215, 222, 238))
+                setPadding(dp(2), dp(2), dp(2), dp(2))
+                setImageBitmap(item.previewResult ?: item.bitmap)
+                alpha = if (item.bitmap == null) 0.4f else 1f
+            }
+            row.addView(thumb, LinearLayout.LayoutParams(dp(76), dp(76)).apply {
+                leftMargin = dp(4); rightMargin = dp(4)
+            })
+            thumb.setOnClickListener {
+                batchIndex = index
+                rebuildBatchThumbs()
+                refreshPreview()
+            }
+        }
+    }
+
+    private fun startBatchSave() = withStoragePermission { startBatchSaveNow() }
+
+    private fun startBatchSaveNow() {
+        if (batchItems.isEmpty()) return
+        val total = batchItems.size
+        batchProgress?.max = total
+        lifecycleScope.launch {
+            var success = 0
+            var failed = 0
+            batchItems.forEachIndexed { index, item ->
+                batchStatus?.text = "正在导出 ${index + 1}/$total …"
+                try {
+                    withContext(Dispatchers.IO) {
+                        // 导出阶段重新以最高分辨率载入原图，保证成品清晰度
+                        val bitmap = PhotoRepository.load(this@MainActivity, item.uri)
+                        val detected = processor.detectLargestFace(bitmap)
+                        val output = processor.render(bitmap, spec, panelSettings.copyValues(), detected)
+                        PhotoRepository.save(this@MainActivity, output, spec, panelSettings, "%02d".format(index + 1))
+                    }
+                    success++
+                } catch (error: Throwable) {
+                    failed++
+                    item.status = "导出失败：${error.message}"
+                }
+                batchProgress?.progress = index + 1
+            }
+            batchStatus?.text = "完成：成功 $success 张，失败 $failed 张 · Pictures/快捷证件照"
+            AlertDialog.Builder(this@MainActivity).setTitle("批量导出完成")
+                .setMessage("成功 $success 张，失败 $failed 张\n保存位置：Pictures/快捷证件照")
+                .setPositiveButton("完成", null).show()
+        }
+    }
+
+    private class BatchItem(val uri: Uri) {
+        var bitmap: android.graphics.Bitmap? = null
+        var face: FaceBox? = null
+        var previewResult: android.graphics.Bitmap? = null
+        var status: String = "待处理"
     }
 
     private data class BitmapHolder(val bitmap: android.graphics.Bitmap)
