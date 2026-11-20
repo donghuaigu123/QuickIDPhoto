@@ -7,6 +7,7 @@ import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
@@ -24,6 +25,7 @@ import android.widget.Spinner
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -61,6 +63,16 @@ class MainActivity : AppCompatActivity() {
     private var renderVersion = 0
     private var lastSaved: Uri? = null
     private var pendingStorageAction: (() -> Unit)? = null
+
+    // 页面状态：返回键/系统侧滑返回时回到上一页，而不是直接退出应用
+    private var currentScreen = SCREEN_HOME
+    private var lastBackPress = 0L
+
+    companion object {
+        private const val SCREEN_HOME = 0
+        private const val SCREEN_EDITOR = 1
+        private const val SCREEN_BATCH = 2
+    }
     private val storagePermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -81,10 +93,31 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (currentScreen != SCREEN_HOME) {
+                    // 编辑页/批量页：先返回首页，符合日常“返回上一页”习惯
+                    renderJob?.cancel()
+                    batchRenderJob?.cancel()
+                    showHome()
+                } else {
+                    // 首页：连按两次才退出，避免侧滑误触直接退出应用
+                    val now = SystemClock.elapsedRealtime()
+                    if (now - lastBackPress < 2200) {
+                        isEnabled = false
+                        finish()
+                    } else {
+                        lastBackPress = now
+                        Toast.makeText(this@MainActivity, "再返回一次即可退出", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        })
         showHome()
     }
 
     private fun showHome() {
+        currentScreen = SCREEN_HOME
         renderJob?.cancel()
         batchRenderJob?.cancel()
         panelBatchMode = false
@@ -130,7 +163,6 @@ class MainActivity : AppCompatActivity() {
             "• MODNet + 人像分割双引擎抠图，背景清理与发丝保留\n" +
             "• 15 种规格与自定义像素 / DPI，人脸自动构图\n" +
             "• 纯色 / 渐变 / 透明背景，可视化取色\n" +
-            "• 智能换装：西装 / 衬衫 / 制服自动对齐贴合\n" +
             "• Lanczos-3 高清输出 1x / 2x / 3x，KB 大小限制\n" +
             "• 美颜、白平衡、五尺寸排版照与批量预览出片\n\n" +
             "所有照片均在本机处理，不上传服务器。不同机构可能有特殊要求，请以官方最新公告为准。",
@@ -181,6 +213,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showEditor() {
+        currentScreen = SCREEN_EDITOR
         val root = vertical(this).apply { setBackgroundColor(Surface) }
         val toolbar = horizontal(this).apply { setPadding(dp(10), dp(8), dp(10), dp(6)) }
         toolbar.addView(action("‹ 首页") { showHome() }, LinearLayout.LayoutParams(0, dp(52), 1f))
@@ -231,7 +264,7 @@ class MainActivity : AppCompatActivity() {
         }
         val row = horizontal(this)
         editorTabButtons.clear()
-        listOf("智能构图", "抠图换底", "美颜精修", "光影调色", "智能换装", "输出排版").forEachIndexed { index, name ->
+        listOf("智能构图", "抠图换底", "美颜精修", "光影调色", "输出排版").forEachIndexed { index, name ->
             val button = action(name) { showEditorTab(index) }
             editorTabButtons.add(button)
             row.addView(button, LinearLayout.LayoutParams(dp(116), dp(48)).apply {
@@ -257,8 +290,7 @@ class MainActivity : AppCompatActivity() {
             1 -> backgroundPanel(panel)
             2 -> beautyPanel(panel)
             3 -> tonePanel(panel)
-            4 -> clothingPanel(panel)
-            5 -> outputPanel(panel)
+            4 -> outputPanel(panel)
         }
     }
 
@@ -415,15 +447,15 @@ class MainActivity : AppCompatActivity() {
         val hd = horizontal(this)
         listOf(1 to "标准 1x", 2 to "高清 2x", 3 to "超清 3x").forEach { (value, name) ->
             hd.addView(chip(name, panelSettings.outputScale == value) {
-                panelSettings.outputScale = value; showEditorTab(5)
+                panelSettings.outputScale = value; showEditorTab(4)
             }, LinearLayout.LayoutParams(0, dp(48), 1f))
         }
         panel.addView(hd)
         panel.addView(label("高清倍率在标准尺寸基础上放大输出，Lanczos-3 重采样保留细节。", 12f, Muted))
         panel.addView(sectionTitle("格式与保存"))
         val format = horizontal(this)
-        format.addView(chip("JPG", !panelSettings.png) { panelSettings.png = false; showEditorTab(5) }, LinearLayout.LayoutParams(0, dp(48), 1f))
-        format.addView(chip("PNG", panelSettings.png) { panelSettings.png = true; showEditorTab(5) }, LinearLayout.LayoutParams(0, dp(48), 1f))
+        format.addView(chip("JPG", !panelSettings.png) { panelSettings.png = false; showEditorTab(4) }, LinearLayout.LayoutParams(0, dp(48), 1f))
+        format.addView(chip("PNG", panelSettings.png) { panelSettings.png = true; showEditorTab(4) }, LinearLayout.LayoutParams(0, dp(48), 1f))
         format.addView(primaryAction(if (panelBatchMode) "批量保存" else "保存到相册") {
             if (panelBatchMode) startBatchSave() else savePhoto()
         }, LinearLayout.LayoutParams(0, dp(48), 1.4f))
@@ -437,7 +469,7 @@ class MainActivity : AppCompatActivity() {
         LayoutSheetGenerator.layouts.forEachIndexed { index, layout ->
             layoutButtons.addView(chip(layout.first, panelSettings.printLayout == index) {
                 panelSettings.printLayout = index
-                showEditorTab(5)
+                showEditorTab(4)
             }, LinearLayout.LayoutParams(dp(110), dp(48)))
         }
         layoutRow.addView(layoutButtons)
@@ -446,7 +478,7 @@ class MainActivity : AppCompatActivity() {
         listOf("排版白底" to Color.WHITE, "排版浅灰" to Color.rgb(238, 240, 244), "排版米白" to Color.rgb(250, 246, 238)).forEach { (name, color) ->
             printBg.addView(chip(name, panelSettings.printBackgroundColor == color) {
                 panelSettings.printBackgroundColor = color
-                showEditorTab(5)
+                showEditorTab(4)
             }, LinearLayout.LayoutParams(0, dp(46), 1f))
         }
         panel.addView(printBg)
@@ -455,60 +487,6 @@ class MainActivity : AppCompatActivity() {
         export.addView(action("分享成品") { shareLastSaved() }, LinearLayout.LayoutParams(0, dp(50), 1f))
         panel.addView(export)
         panel.addView(label("六寸排版为 1800×1200px / 300DPI，含裁切辅助线。打印时请关闭“适应页面”，选择原始尺寸。", 12f, Color.GRAY))
-    }
-
-    private fun clothingPanel(panel: LinearLayout) {
-        panel.addView(sectionTitle("换装样式（按人脸位置自动贴合）"))
-        val styleScroll = HorizontalScrollView(this)
-        val styleRow = horizontal(this)
-        ClothingEngine.styles.forEachIndexed { index, style ->
-            styleRow.addView(chip(style.name, panelSettings.clothingStyle == index) {
-                panelSettings.clothingStyle = index
-                if (index > 0) panelSettings.clothingColor = style.defaultColor
-                showEditorTab(4); refreshPreview()
-            }, LinearLayout.LayoutParams(dp(112), dp(48)))
-        }
-        styleScroll.addView(styleRow)
-        panel.addView(styleScroll)
-        if (panelSettings.clothingStyle > 0) {
-            panel.addView(sectionTitle("服装颜色"))
-            val colorScroll = HorizontalScrollView(this)
-            val colorRow = horizontal(this)
-            val palette = listOf(
-                "黑色" to Color.rgb(35, 38, 48),
-                "藏青" to Color.rgb(38, 52, 84),
-                "深灰" to Color.rgb(72, 78, 90),
-                "白色" to Color.rgb(244, 246, 250),
-                "商务蓝" to Color.rgb(126, 164, 218),
-                "酒红" to Color.rgb(120, 42, 52)
-            )
-            palette.forEach { (name, color) ->
-                colorRow.addView(chip(name, panelSettings.clothingColor == color) {
-                    panelSettings.clothingColor = color
-                    showEditorTab(4); refreshPreview()
-                }, LinearLayout.LayoutParams(dp(96), dp(48)))
-            }
-            colorRow.addView(action("自定义") { customClothingColorDialog() }, LinearLayout.LayoutParams(dp(100), dp(48)))
-            colorScroll.addView(colorRow)
-            panel.addView(colorScroll)
-        }
-        panel.addView(label("正装素材在本地实时生成，领口自动对齐下巴与肩线；如人物已穿着正装可不换装。", 12f, Muted))
-    }
-
-    private fun customClothingColorDialog() {
-        val picker = VisualColorPickerView(this).apply {
-            layoutParams = FrameLayout.LayoutParams(-1, dp(340))
-            setColor(panelSettings.clothingColor)
-        }
-        val container = FrameLayout(this).apply {
-            setPadding(dp(18), dp(6), dp(18), 0)
-            addView(picker)
-        }
-        this@MainActivity.threeDDialog().setTitle("选择服装颜色").setView(container)
-            .setPositiveButton("应用") { _, _ ->
-                panelSettings.clothingColor = picker.selectedColor
-                showEditorTab(4); refreshPreview()
-            }.setNegativeButton("取消", null).show()
     }
 
     private fun slider(
@@ -753,6 +731,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showBatch(uris: List<Uri>) {
+        currentScreen = SCREEN_BATCH
         renderJob?.cancel()
         batchRenderJob?.cancel()
         batchItems = uris.map { BatchItem(it) }

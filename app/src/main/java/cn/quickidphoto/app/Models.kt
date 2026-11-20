@@ -85,10 +85,7 @@ data class EditorSettings(
     var transparentBackground: Boolean = false,
     var keepOriginalBackground: Boolean = true,
     var jpegQuality: Int = 95,
-    var png: Boolean = false,
-    // 智能换装：0 表示不换装，其余为 ClothingEngine.styles 的下标
-    var clothingStyle: Int = 0,
-    var clothingColor: Int = Color.rgb(38, 52, 84)
+    var png: Boolean = false
 ) {
     fun copyValues() = copy()
 }

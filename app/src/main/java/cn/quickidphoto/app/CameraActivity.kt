@@ -65,10 +65,10 @@ class CameraActivity : AppCompatActivity() {
         val root = vertical(this).apply { setBackgroundColor(Color.BLACK) }
         val toolbar = horizontal(this).apply {
             setPadding(dp(8), dp(8), dp(8), dp(8))
-            addView(glassAction("‹ 返回") { finish() }, LinearLayout.LayoutParams(0, dp(52), 1f))
+            addView(action("‹ 返回") { finish() }, LinearLayout.LayoutParams(0, dp(52), 1f))
             addView(label("拍摄 · ${spec.name}", 17f, Color.WHITE).apply { gravity = Gravity.CENTER },
                 LinearLayout.LayoutParams(0, dp(52), 2f))
-            addView(glassAction("切换镜头") { switchCamera() }, LinearLayout.LayoutParams(0, dp(52), 1f))
+            addView(action("切换镜头") { switchCamera() }, LinearLayout.LayoutParams(0, dp(52), 1f))
         }
         root.addView(toolbar)
         val frame = FrameLayout(this)
@@ -88,14 +88,14 @@ class CameraActivity : AppCompatActivity() {
         val controls = horizontal(this).apply {
             gravity = Gravity.CENTER
             setPadding(dp(8), dp(4), dp(8), dp(18))
-            addView(glassAction("网格") { this@CameraActivity.overlay.toggleGrid() }, LinearLayout.LayoutParams(0, dp(56), 1f))
-            addView(glassAction("定时 关") { view ->
+            addView(action("网格") { this@CameraActivity.overlay.toggleGrid() }, LinearLayout.LayoutParams(0, dp(56), 1f))
+            addView(action("定时 关") { view ->
                 countdownSeconds = if (countdownSeconds == 0) 3 else 0
                 (view as? ThreeDButton)?.text =
                     if (countdownSeconds == 0) "定时 关" else "定时 ${countdownSeconds}s"
             }, LinearLayout.LayoutParams(0, dp(56), 1f))
             addView(primaryAction("拍摄") { takePhoto() }, LinearLayout.LayoutParams(0, dp(64), 1.3f))
-            addView(glassAction("闪光灯") { cycleFlash() }, LinearLayout.LayoutParams(0, dp(56), 1f))
+            addView(action("闪光灯") { cycleFlash() }, LinearLayout.LayoutParams(0, dp(56), 1f))
         }
         root.addView(controls)
         setContentView(root)

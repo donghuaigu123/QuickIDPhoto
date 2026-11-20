@@ -98,25 +98,10 @@ class IdPhotoProcessor(context: android.content.Context) {
             )
         }
         val matte = obtainMatte(source, left, top, width, height, cropped)
-        var working = cropped
-        if (settings.clothingStyle > 0 && face != null) {
-            // 人脸坐标换算到裁剪后的图上，再按脸宽贴合正装图层
-            val scale = cropped.width.toFloat() / width
-            val faceInCrop = FaceBox(
-                (face.left - left) * scale, (face.top - top) * scale,
-                (face.right - left) * scale, (face.bottom - top) * scale
-            )
-            working = try {
-                ClothingEngine.applyClothing(cropped, matte, faceInCrop, settings)
-            } catch (error: Throwable) {
-                // 换装失败不应导致整张证件照无法生成
-                cropped
-            }
-        }
         val composited = if (settings.keepOriginalBackground) {
-            working
+            cropped
         } else {
-            replaceBackground(working, settings, matte)
+            replaceBackground(cropped, settings, matte)
         }
         val beautified = applyBeauty(composited, settings)
         val effectiveScale = if (preview) 1 else settings.outputScale.coerceIn(1, 3)

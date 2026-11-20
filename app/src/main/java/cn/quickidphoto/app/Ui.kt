@@ -121,13 +121,6 @@ fun Context.primaryAction(text: String, onClick: (View) -> Unit = {}): ThreeDBut
             20, OnPrimaryText, null, 6)
     }
 
-fun Context.glassAction(text: String, onClick: (View) -> Unit = {}): ThreeDButton =
-    baseButton(text, onClick).apply {
-        style(Color.argb(96, 255, 255, 255), Color.argb(60, 255, 255, 255),
-            Color.argb(60, 255, 255, 255), Color.argb(40, 255, 255, 255),
-            20, Color.WHITE, Color.argb(120, 255, 255, 255), 3)
-    }
-
 /** 选中/未选中 Chip，与页面按钮共享同一套立体样式。 */
 fun ThreeDButton.applySelectedStyle(selected: Boolean) {
     if (selected) {
