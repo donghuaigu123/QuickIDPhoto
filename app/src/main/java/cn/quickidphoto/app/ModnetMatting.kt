@@ -84,32 +84,22 @@ class ModnetMatting(context: Context) {
                         val output = result.get(0) as OnnxTensor
                         val shape = output.info.shape
                         val raw = output.floatBuffer
-                        val channelCount = max(1, (shape.getOrNull(1) ?: 1).toInt())
                         val plane = size * size
-                        val alpha = FloatArray(plane)
-                        if (channelCount >= plane && raw.remaining() >= plane) {
-                            // Shape like (1, H*W) or (H*W,): take the first plane directly.
-                            for (i in 0 until plane) alpha[i] = raw.get(i).coerceIn(0f, 1f)
-                        } else {
-                            // Shape like (1,1,H,W) or (1,H,W,1): average available channels per pixel.
-                            val total = raw.remaining()
-                            val usable = minOf(total, channelCount * plane)
-                            for (i in 0 until plane) {
-                                var sum = 0f
-                                var count = 0
-                                var c = 0
-                                while (c < usable - i && c < channelCount * plane) {
-                                    val index = c * plane + i
-                                    if (index in 0 until total) {
-                                        sum += raw.get(index)
-                                        count++
-                                    }
-                                    c++
-                                }
-                                alpha[i] = if (count > 0) (sum / count).coerceIn(0f, 1f) else 0f
-                            }
+                        val total = raw.remaining()
+                        val channelCount = max(1, (shape.getOrNull(1) ?: 1).toInt())
+                        val lastDim = (shape.lastOrNull() ?: 1).toInt()
+                        when {
+                            // (1,1,H,W), (1,H,W) or (1,H,W,1): one value per pixel.
+                            total == plane -> FloatArray(plane) { raw.get().coerceIn(0f, 1f) }
+                            // (1,H*W) style: first plane is the matte.
+                            channelCount >= plane && total >= plane ->
+                                FloatArray(plane) { raw.get().coerceIn(0f, 1f) }
+                            // (1,H,W,2) interleaved foreground+alpha pairs: keep alpha.
+                            total == plane * 2 && lastDim == 2 ->
+                                FloatArray(plane) { raw.get(); raw.get().coerceIn(0f, 1f) }
+                            // Unknown layout: let the caller fall back to ML Kit.
+                            else -> null
                         }
-                        alpha
                     }
                 }
         } catch (error: Throwable) {
