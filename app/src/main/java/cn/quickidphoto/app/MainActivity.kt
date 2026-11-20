@@ -29,7 +29,6 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
-import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -56,7 +55,7 @@ class MainActivity : AppCompatActivity() {
     private var batchVersion = 0
     private var previewStatus: TextView? = null
     private var editorPanel: LinearLayout? = null
-    private val editorTabButtons = mutableListOf<MaterialButton>()
+    private val editorTabButtons = mutableListOf<ThreeDButton>()
     private var rendered: android.graphics.Bitmap? = null
     private var renderJob: Job? = null
     private var renderVersion = 0
@@ -505,7 +504,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(18), dp(6), dp(18), 0)
             addView(picker)
         }
-        AlertDialog.Builder(this).setTitle("选择服装颜色").setView(container)
+        this@MainActivity.threeDDialog().setTitle("选择服装颜色").setView(container)
             .setPositiveButton("应用") { _, _ ->
                 panelSettings.clothingColor = picker.selectedColor
                 showEditorTab(4); refreshPreview()
@@ -616,7 +615,7 @@ class MainActivity : AppCompatActivity() {
         val height = numberInput("高度 px", spec.heightPx.toString())
         val dpi = numberInput("DPI", spec.dpi.toString())
         form.addView(width); form.addView(height); form.addView(dpi)
-        AlertDialog.Builder(this).setTitle("自定义输出规格").setView(form)
+        this@MainActivity.threeDDialog().setTitle("自定义输出规格").setView(form)
             .setPositiveButton("应用") { _, _ ->
                 val w = width.text.toString().toIntOrNull()
                 val h = height.text.toString().toIntOrNull()
@@ -640,7 +639,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(18), dp(6), dp(18), 0)
             addView(picker)
         }
-        AlertDialog.Builder(this).setTitle("可视化选择背景颜色").setView(container)
+        this@MainActivity.threeDDialog().setTitle("可视化选择背景颜色").setView(container)
             .setPositiveButton("应用") { _, _ ->
                 panelSettings.backgroundColor = picker.selectedColor
                 panelSettings.keepOriginalBackground = false
@@ -666,7 +665,7 @@ class MainActivity : AppCompatActivity() {
             addView(label("下半部分颜色", 13f, Muted))
             addView(bottomPicker)
         }
-        AlertDialog.Builder(this).setTitle("自定义渐变背景").setView(form)
+        this@MainActivity.threeDDialog().setTitle("自定义渐变背景").setView(form)
             .setPositiveButton("应用") { _, _ ->
                 panelSettings.keepOriginalBackground = false
                 panelSettings.transparentBackground = false
@@ -709,7 +708,7 @@ class MainActivity : AppCompatActivity() {
                 rendered = result.first
                 preview?.bitmap = result.first
                 lastSaved = result.second
-                AlertDialog.Builder(this@MainActivity).setTitle("已保存到相册")
+                this@MainActivity.threeDDialog().setTitle("已保存到相册")
                     .setMessage("Pictures/快捷证件照\n${spec.widthPx}×${spec.heightPx}px")
                     .setPositiveButton("完成", null)
                     .setNeutralButton("分享") { _, _ -> shareLastSaved() }.show()
@@ -917,7 +916,7 @@ class MainActivity : AppCompatActivity() {
                 batchProgress?.progress = index + 1
             }
             batchStatus?.text = "完成：成功 $success 张，失败 $failed 张 · Pictures/快捷证件照"
-            AlertDialog.Builder(this@MainActivity).setTitle("批量导出完成")
+            this@MainActivity.threeDDialog().setTitle("批量导出完成")
                 .setMessage("成功 $success 张，失败 $failed 张\n保存位置：Pictures/快捷证件照")
                 .setPositiveButton("完成", null).show()
         }

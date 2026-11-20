@@ -91,7 +91,7 @@ class CameraActivity : AppCompatActivity() {
             addView(glassAction("网格") { this@CameraActivity.overlay.toggleGrid() }, LinearLayout.LayoutParams(0, dp(56), 1f))
             addView(glassAction("定时 关") { view ->
                 countdownSeconds = if (countdownSeconds == 0) 3 else 0
-                (view as? com.google.android.material.button.MaterialButton)?.text =
+                (view as? ThreeDButton)?.text =
                     if (countdownSeconds == 0) "定时 关" else "定时 ${countdownSeconds}s"
             }, LinearLayout.LayoutParams(0, dp(56), 1f))
             addView(primaryAction("拍摄") { takePhoto() }, LinearLayout.LayoutParams(0, dp(64), 1.3f))

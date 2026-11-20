@@ -8,6 +8,8 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import java.nio.FloatBuffer
 import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
  * MODNet portrait matting (hivision_modnet.onnx) running fully offline via ONNX Runtime.
@@ -54,16 +56,35 @@ class ModnetMatting(context: Context) {
     }
 
     /**
-     * Runs matting and returns a portrait alpha of [size]×[size] in [0,1],
-     * or null when the model cannot run.
+     * Runs matting and returns a soft alpha of the SOURCE resolution in [0,1].
+     * The source is letterboxed into the square model input (edge replication)
+     * instead of being stretched, so portrait proportions and edge positions
+     * stay correct; the alpha is then mapped back to the original crop.
      */
     fun matte(source: Bitmap, size: Int = INPUT_SIZE): FloatArray? {
         val active = session ?: return null
         val activeEnv = env ?: return null
+        val sw = source.width
+        val sh = source.height
         return try {
-            val resized = Bitmap.createScaledBitmap(source, size, size, true)
+            val scale = minOf(size.toFloat() / sw, size.toFloat() / sh)
+            val nw = max(1, (sw * scale).roundToInt())
+            val nh = max(1, (sh * scale).roundToInt())
+            val offsetX = (size - nw) / 2
+            val offsetY = (size - nh) / 2
+            val srcPixels = IntArray(sw * sh)
+            source.getPixels(srcPixels, 0, sw, 0, 0, sw, sh)
+            // 用边缘像素复制填充模型输入，避免拉伸导致的人形变形和边缘错位
             val pixels = IntArray(size * size)
-            resized.getPixels(pixels, 0, size, 0, 0, size, size)
+            for (y in 0 until size) {
+                val sy = ((y - offsetY).toFloat() / scale).roundToInt().coerceIn(0, sh - 1)
+                val row = y * size
+                val srcRow = sy * sw
+                for (x in 0 until size) {
+                    val sx = ((x - offsetX).toFloat() / scale).roundToInt().coerceIn(0, sw - 1)
+                    pixels[row + x] = srcPixels[srcRow + sx]
+                }
+            }
             val buffer = FloatBuffer.allocate(3 * size * size)
             for (channel in 0 until 3) {
                 for (i in pixels.indices) {
@@ -78,6 +99,7 @@ class ModnetMatting(context: Context) {
             buffer.rewind()
 
             val inputName = active.inputNames.first()
+            var squareAlpha: FloatArray? = null
             OnnxTensor.createTensor(activeEnv, buffer, longArrayOf(1, 3, size.toLong(), size.toLong()))
                 .use { input ->
                     active.run(mapOf(inputName to input)).use { result ->
@@ -88,20 +110,27 @@ class ModnetMatting(context: Context) {
                         val total = raw.remaining()
                         val channelCount = max(1, (shape.getOrNull(1) ?: 1).toInt())
                         val lastDim = (shape.lastOrNull() ?: 1).toInt()
-                        when {
-                            // (1,1,H,W), (1,H,W) or (1,H,W,1): one value per pixel.
+                        squareAlpha = when {
                             total == plane -> FloatArray(plane) { raw.get().coerceIn(0f, 1f) }
-                            // (1,H*W) style: first plane is the matte.
                             channelCount >= plane && total >= plane ->
                                 FloatArray(plane) { raw.get().coerceIn(0f, 1f) }
-                            // (1,H,W,2) interleaved foreground+alpha pairs: keep alpha.
                             total == plane * 2 && lastDim == 2 ->
                                 FloatArray(plane) { raw.get(); raw.get().coerceIn(0f, 1f) }
-                            // Unknown layout: let the caller fall back to ML Kit.
                             else -> null
                         }
                     }
                 }
+            val alphaSquare = squareAlpha ?: return null
+            // 将方形推理结果映射回原始宽高比的区域，双线性采样保持边缘平滑
+            val result = FloatArray(sw * sh)
+            for (y in 0 until sh) {
+                val my = offsetY.toFloat() + (y + 0.5f) * nh / sh - 0.5f
+                for (x in 0 until sw) {
+                    val mx = offsetX.toFloat() + (x + 0.5f) * nw / sw - 0.5f
+                    result[y * sw + x] = bilinear(alphaSquare, size, size, mx, my)
+                }
+            }
+            result
         } catch (error: Throwable) {
             null
         }
@@ -117,5 +146,17 @@ class ModnetMatting(context: Context) {
     companion object {
         private const val MODEL_ASSET = "hivision_modnet.onnx"
         const val INPUT_SIZE = 512
+
+        private fun bilinear(values: FloatArray, w: Int, h: Int, x: Float, y: Float): Float {
+            val x0 = x.toInt().coerceIn(0, w - 1)
+            val y0 = y.toInt().coerceIn(0, h - 1)
+            val x1 = min(w - 1, x0 + 1)
+            val y1 = min(h - 1, y0 + 1)
+            val fx = (x - x0).coerceIn(0f, 1f)
+            val fy = (y - y0).coerceIn(0f, 1f)
+            val top = values[y0 * w + x0] * (1f - fx) + values[y0 * w + x1] * fx
+            val bottom = values[y1 * w + x0] * (1f - fx) + values[y1 * w + x1] * fx
+            return top * (1f - fy) + bottom * fy
+        }
     }
 }

@@ -87,7 +87,9 @@ class IdPhotoProcessor(context: android.content.Context) {
         val width = crop.width.roundToInt().coerceIn(1, source.width - left)
         val height = crop.height.roundToInt().coerceIn(1, source.height - top)
         var cropped = Bitmap.createBitmap(source, left, top, width, height)
-        val processingLimit = if (settings.keepOriginalBackground) 3200 else 2800
+        // 抠图链路需要同时驻留多路全分辨率蒙版；2200px 已高于所有规格的输出需求，
+        // 可在保证清晰度的同时显著降低华为等机型的内存峰值。
+        val processingLimit = if (settings.keepOriginalBackground) 3200 else 2200
         if (cropped.width > processingLimit || cropped.height > processingLimit) {
             val scale = processingLimit.toFloat() / max(cropped.width, cropped.height)
             cropped = resizeLanczos3(
@@ -104,7 +106,12 @@ class IdPhotoProcessor(context: android.content.Context) {
                 (face.left - left) * scale, (face.top - top) * scale,
                 (face.right - left) * scale, (face.bottom - top) * scale
             )
-            working = ClothingEngine.applyClothing(cropped, matte, faceInCrop, settings)
+            working = try {
+                ClothingEngine.applyClothing(cropped, matte, faceInCrop, settings)
+            } catch (error: Throwable) {
+                // 换装失败不应导致整张证件照无法生成
+                cropped
+            }
         }
         val composited = if (settings.keepOriginalBackground) {
             working
@@ -128,18 +135,8 @@ class IdPhotoProcessor(context: android.content.Context) {
         val pixels = IntArray(source.width * source.height)
         source.getPixels(pixels, 0, source.width, 0, 0, source.width, source.height)
 
-        val softness = (settings.edgeFeather / 100f * 0.22f).coerceAtLeast(0.002f)
-        val threshold = (0.5f - settings.edgeShift / 100f * 0.30f).coerceIn(0.08f, 0.92f)
-        var alpha = FloatArray(source.width * source.height)
-        for (y in 0 until source.height) {
-            for (x in 0 until source.width) {
-                val confidence = matte[y * source.width + x]
-                alpha[y * source.width + x] = ((confidence - threshold + softness) /
-                    (2f * softness)).coerceIn(0f, 1f)
-            }
-        }
-        alpha = refineAlpha(alpha, source.width, source.height, settings)
-        val originalBackground = estimateBackground(pixels, alpha)
+        val alpha = smoothMatte(matte, source.width, source.height, settings)
+        val originalBackground = estimateBackground(pixels, matte)
         val decontamStrength = settings.hairDetail / 100f * 0.92f
 
         // Precompute gradient background rows when enabled.
@@ -150,39 +147,125 @@ class IdPhotoProcessor(context: android.content.Context) {
             }
         } else null
 
-        for (i in pixels.indices) {
-            val a = alpha[i]
-            var foreground = pixels[i]
-            if (originalBackground != null && a in 0.025f..0.975f) {
-                // Unmix old background spill from semi-transparent hair and clothing edges.
-                val edgeWeight = (1f - abs(a * 2f - 1f)) * decontamStrength
-                val invAlpha = 1f / max(a, 0.035f)
-                val unmixedR = (Color.red(foreground) - (1f - a) * Color.red(originalBackground)) * invAlpha
-                val unmixedG = (Color.green(foreground) - (1f - a) * Color.green(originalBackground)) * invAlpha
-                val unmixedB = (Color.blue(foreground) - (1f - a) * Color.blue(originalBackground)) * invAlpha
-                foreground = Color.argb(
-                    Color.alpha(foreground),
-                    (Color.red(foreground) * (1f - edgeWeight) + unmixedR * edgeWeight)
-                        .roundToInt().coerceIn(0, 255),
-                    (Color.green(foreground) * (1f - edgeWeight) + unmixedG * edgeWeight)
-                        .roundToInt().coerceIn(0, 255),
-                    (Color.blue(foreground) * (1f - edgeWeight) + unmixedB * edgeWeight)
-                        .roundToInt().coerceIn(0, 255)
-                )
+        val w = source.width
+        val h = source.height
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val i = y * w + x
+                val a = alpha[i]
+                var foreground = pixels[i]
+                if (originalBackground != null && a in 0.02f..0.98f) {
+                    // 局部背景估计：渐变/复杂背景下同样能去掉半透明发丝里的旧背景色
+                    val bg = localBackground(pixels, matte, x, y, w, h, originalBackground)
+                    val edgeWeight = (1f - abs(a * 2f - 1f)) * decontamStrength
+                    val invAlpha = 1f / max(a, 0.035f)
+                    val unmixedR = (Color.red(foreground) - (1f - a) * Color.red(bg)) * invAlpha
+                    val unmixedG = (Color.green(foreground) - (1f - a) * Color.green(bg)) * invAlpha
+                    val unmixedB = (Color.blue(foreground) - (1f - a) * Color.blue(bg)) * invAlpha
+                    foreground = Color.argb(
+                        Color.alpha(foreground),
+                        (Color.red(foreground) * (1f - edgeWeight) + unmixedR * edgeWeight)
+                            .roundToInt().coerceIn(0, 255),
+                        (Color.green(foreground) * (1f - edgeWeight) + unmixedG * edgeWeight)
+                            .roundToInt().coerceIn(0, 255),
+                        (Color.blue(foreground) * (1f - edgeWeight) + unmixedB * edgeWeight)
+                            .roundToInt().coerceIn(0, 255)
+                    )
+                }
+                val targetBackground = when {
+                    settings.transparentBackground -> 0
+                    gradientRows != null -> gradientRows[y]
+                    else -> settings.backgroundColor
+                }
+                val outputAlpha = if (settings.transparentBackground) (a * 255).roundToInt() else 255
+                val r = (Color.red(foreground) * a + Color.red(targetBackground) * (1f - a)).roundToInt()
+                val g = (Color.green(foreground) * a + Color.green(targetBackground) * (1f - a)).roundToInt()
+                val b = (Color.blue(foreground) * a + Color.blue(targetBackground) * (1f - a)).roundToInt()
+                pixels[i] = Color.argb(outputAlpha, r, g, b)
             }
-            val targetBackground = when {
-                settings.transparentBackground -> 0
-                gradientRows != null -> gradientRows[i / source.width]
-                else -> settings.backgroundColor
-            }
-            val outputAlpha = if (settings.transparentBackground) (a * 255).roundToInt() else 255
-            val r = (Color.red(foreground) * a + Color.red(targetBackground) * (1f - a)).roundToInt()
-            val g = (Color.green(foreground) * a + Color.green(targetBackground) * (1f - a)).roundToInt()
-            val b = (Color.blue(foreground) * a + Color.blue(targetBackground) * (1f - a)).roundToInt()
-            pixels[i] = Color.argb(outputAlpha, r, g, b)
         }
         result.setPixels(pixels, 0, source.width, 0, 0, source.width, source.height)
         return result
+    }
+
+    /**
+     * 边缘平滑：在低分辨率上做盒式模糊再上采样，消除锯齿与阶梯感；
+     * 再按“发丝细节”权重混合原始蒙版保留真实发丝，最后用 smoothstep 做柔和过渡。
+     */
+    private fun smoothMatte(raw: FloatArray, width: Int, height: Int, settings: EditorSettings): FloatArray {
+        val maxSide = 1200
+        val step = max(1, (maxOf(width, height) + maxSide - 1) / maxSide)
+        val sw = max(1, (width + step - 1) / step)
+        val sh = max(1, (height + step - 1) / step)
+        val small = FloatArray(sw * sh)
+        for (sy in 0 until sh) {
+            val y0 = sy * step
+            val y1 = min(height, y0 + step)
+            for (sx in 0 until sw) {
+                val x0 = sx * step
+                val x1 = min(width, x0 + step)
+                var sum = 0f
+                var count = 0
+                for (y in y0 until y1) {
+                    for (x in x0 until x1) {
+                        sum += raw[y * width + x]
+                        count++
+                    }
+                }
+                small[sy * sw + sx] = sum / max(1, count)
+            }
+        }
+        val blurred = boxBlur(small, sw, sh, 2)
+        val up = FloatArray(raw.size)
+        for (y in 0 until height) {
+            val my = (y + 0.5f) / step - 0.5f
+            for (x in 0 until width) {
+                up[y * width + x] = bilinear(blurred, sw, sh, (x + 0.5f) / step - 0.5f, my)
+            }
+        }
+        val detail = (0.18f + settings.hairDetail / 100f * 0.42f).coerceIn(0.15f, 0.60f)
+        val softness = (0.10f + settings.edgeFeather / 100f * 0.14f).coerceIn(0.04f, 0.24f)
+        val threshold = (0.5f - settings.edgeShift / 100f * 0.20f).coerceIn(0.15f, 0.85f)
+        val output = FloatArray(raw.size)
+        for (i in raw.indices) {
+            val merged = up[i] * (1f - detail) + raw[i] * detail
+            val t = ((merged - threshold) / (2f * softness) + 0.5f).coerceIn(0f, 1f)
+            output[i] = t * t * (3f - 2f * t)
+        }
+        return output
+    }
+
+    /** 在边缘附近采样周围确定背景像素，得到局部背景色，避免渐变背景产生色边。 */
+    private fun localBackground(
+        pixels: IntArray, matte: FloatArray, x: Int, y: Int,
+        width: Int, height: Int, fallback: Int
+    ): Int {
+        var r = 0f
+        var g = 0f
+        var b = 0f
+        var count = 0
+        val radii = intArrayOf(6, 14, 28, 48)
+        val dx = intArrayOf(1, -1, 0, 0, 1, 1, -1, -1)
+        val dy = intArrayOf(0, 0, 1, -1, 1, -1, 1, -1)
+        for (radius in radii) {
+            for (dir in dx.indices) {
+                val sx = x + dx[dir] * radius
+                val sy = y + dy[dir] * radius
+                if (sx !in 0 until width || sy !in 0 until height) continue
+                val i = sy * width + sx
+                if (matte[i] < 0.12f) {
+                    val p = pixels[i]
+                    r += Color.red(p); g += Color.green(p); b += Color.blue(p)
+                    count++
+                }
+            }
+        }
+        if (count == 0) return fallback
+        return Color.rgb(
+            (r / count).roundToInt().coerceIn(0, 255),
+            (g / count).roundToInt().coerceIn(0, 255),
+            (b / count).roundToInt().coerceIn(0, 255)
+        )
     }
 
     /**
@@ -205,7 +288,7 @@ class IdPhotoProcessor(context: android.content.Context) {
         val fused = fuseAlphas(modnet, mlkit, cropped.width, cropped.height)
         val pixels = IntArray(cropped.width * cropped.height)
         cropped.getPixels(pixels, 0, cropped.width, 0, 0, cropped.width, cropped.height)
-        val cleaned = cleanupBackground(fused, pixels, cropped.width, cropped.height)
+        val cleaned = cleanupBackground(fused, mlkit, pixels, cropped.width, cropped.height)
         cacheSource = source
         cacheLeft = left; cacheTop = top
         cacheWidth = width; cacheHeight = height
@@ -213,31 +296,29 @@ class IdPhotoProcessor(context: android.content.Context) {
         return cleaned
     }
 
-    /** MODNet(低分辨率) 与 ML Kit(全分辨率) 互补融合。 */
+    /**
+     * MODNet（发丝细节）与 ML Kit（人体区域）连续融合：
+     * 用平滑权重把 ML Kit 的高置信人体区域补进 MODNet 的低置信区域，
+     * 不做硬取最大值，避免融合处产生阶梯状粗糙边缘。
+     */
     private fun fuseAlphas(modnet: FloatArray?, mlkit: FloatArray?, width: Int, height: Int): FloatArray {
         val full = FloatArray(width * height)
         if (modnet == null && mlkit == null) {
             java.util.Arrays.fill(full, 1f)
             return full
         }
-        val size = ModnetMatting.INPUT_SIZE
-        for (y in 0 until height) {
-            val my = y.toFloat() * (size - 1) / max(1, height - 1)
-            for (x in 0 until width) {
-                val mx = x.toFloat() * (size - 1) / max(1, width - 1)
-                val i = y * width + x
-                val m = if (modnet != null) bilinear(modnet, size, size, mx, my) else -1f
-                val k = if (mlkit != null && i < mlkit.size) mlkit[i] else -1f
-                full[i] = when {
-                    k < 0f -> m
-                    m < 0f -> k
-                    // ML Kit 判定为人体且 MODNet 偏低：提升，修复边缘被扣掉
-                    k > 0.62f && m < k -> min(1f, k * 0.92f + 0.10f)
-                    // MODNet 明显更确信（发丝细节）：保留 MODNet 结果
-                    m > k + 0.28f -> m
-                    // 其余情况取两者较大值，抑制背景残留
-                    else -> max(m, k * 0.88f)
-                }.coerceIn(0f, 1f)
+        for (i in full.indices) {
+            val m = if (modnet != null && i < modnet.size) modnet[i] else -1f
+            val k = if (mlkit != null && i < mlkit.size) mlkit[i] else -1f
+            full[i] = when {
+                k < 0f -> m
+                m < 0f -> k
+                else -> {
+                    // smoothstep(0.32, 0.72)：ML Kit 越确信，越向人体侧柔和提升
+                    val t = ((k - 0.32f) / 0.40f).coerceIn(0f, 1f)
+                    val body = t * t * (3f - 2f * t)
+                    (m + (1f - m) * body * 0.88f).coerceIn(0f, 1f)
+                }
             }
         }
         return full
@@ -247,7 +328,9 @@ class IdPhotoProcessor(context: android.content.Context) {
      * 从图像四周洪泛标记“确定背景”：与背景色相近或极低置信度的连通区域清零，
      * 而未与边缘连通的低置信度内部区域视为人体空洞并填满，防止身体边缘被吞掉。
      */
-    private fun cleanupBackground(alpha: FloatArray, pixels: IntArray, width: Int, height: Int): FloatArray {
+    private fun cleanupBackground(
+        alpha: FloatArray, mlkit: FloatArray?, pixels: IntArray, width: Int, height: Int
+    ): FloatArray {
         var r = 0.0; var g = 0.0; var b = 0.0; var count = 0
         fun sample(x: Int, y: Int) {
             val i = y * width + x
@@ -264,11 +347,11 @@ class IdPhotoProcessor(context: android.content.Context) {
         val bgR = (r / count).roundToInt()
         val bgG = (g / count).roundToInt()
         val bgB = (b / count).roundToInt()
-        val colorThresholdSq = 62 * 62
+        val colorThresholdSq = 50 * 50
 
         fun isBackground(i: Int): Boolean {
-            if (alpha[i] >= 0.72f) return false // 确定前景，严格保护
-            if (alpha[i] < 0.28f) return true
+            if (alpha[i] >= 0.62f) return false // 确定前景，严格保护
+            if (alpha[i] < 0.20f) return true
             val p = pixels[i]
             val dr = Color.red(p) - bgR
             val dg = Color.green(p) - bgG
@@ -301,9 +384,12 @@ class IdPhotoProcessor(context: android.content.Context) {
             if (y > 0) enqueue(i - width)
             if (y < height - 1) enqueue(i + width)
         }
-        // 内部空洞：未被边缘洪泛触达的低置信度区域补回人体
+        // 内部空洞：未被边缘洪泛触达的低置信度区域按 ML Kit 置信度柔和补回
         for (i in alpha.indices) {
-            if (!visited[i] && alpha[i] in 0f..0.72f) alpha[i] = 0.85f
+            if (!visited[i] && alpha[i] in 0f..0.62f) {
+                val guidance = if (mlkit != null && i < mlkit.size) mlkit[i] else 0.8f
+                alpha[i] = max(alpha[i], (guidance * 0.92f).coerceIn(0f, 0.9f))
+            }
         }
         return alpha
     }

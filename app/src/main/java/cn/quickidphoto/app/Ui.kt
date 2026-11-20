@@ -2,6 +2,8 @@ package cn.quickidphoto.app
 
 import android.content.Context
 import android.content.res.ColorStateList
+import android.util.AttributeSet
+import android.view.ContextThemeWrapper
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -9,11 +11,12 @@ import android.graphics.drawable.StateListDrawable
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.Switch
 import android.widget.TextView
-import com.google.android.material.button.MaterialButton
+import androidx.appcompat.app.AlertDialog
 
 val Ink = Color.rgb(15, 23, 42)
 val Muted = Color.rgb(100, 116, 139)
@@ -22,7 +25,6 @@ val Primary = Color.rgb(79, 102, 255)
 val PrimaryDeep = Color.rgb(124, 92, 255)
 val Accent = Color.rgb(20, 184, 166)
 
-// 高对比度文字色：确保与按钮底色对比度明显
 private val OnPrimaryText = Color.WHITE
 private val OnLightText = Color.rgb(30, 41, 82)
 private val OnLightMuted = Color.rgb(71, 85, 105)
@@ -44,123 +46,107 @@ fun Context.title(text: String): TextView = label(text, 30f, Ink).apply {
     setPadding(0, dp(8), 0, dp(8))
 }
 
-/** 立体按钮背景：顶部高光 + 底部深色营造 3D 厚度，按下后整体变暗。 */
-private fun Context.threeDBackground(
-    topColor: Int, bottomColor: Int,
-    pressedTop: Int, pressedBottom: Int,
-    radius: Int, strokeColor: Int? = null
-): StateListDrawable {
-    fun layer(top: Int, bottom: Int) = GradientDrawable(
-        GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(top, bottom)
-    ).apply {
-        cornerRadius = radius.toFloat()
-        strokeColor?.let { setStroke(dp(1), it) }
-    }
-    return StateListDrawable().apply {
-        addState(intArrayOf(android.R.attr.state_pressed), layer(pressedTop, pressedBottom))
-        addState(intArrayOf(-android.R.attr.state_enabled), layer(pressedTop, pressedBottom))
-        addState(intArrayOf(), layer(topColor, bottomColor))
-    }
-}
+/**
+ * 全应用唯一按钮实现：平台 Button + 自定义 StateListDrawable。
+ * 不使用 MaterialButton，避免其 backgroundTint / ripple 覆盖立体背景。
+ */
+class ThreeDButton @JvmOverloads constructor(
+    context: Context, attrs: AttributeSet? = null
+) : Button(context, attrs, android.R.attr.buttonStyle) {
+    private var restingElevation = 0f
 
-/** 按下时按钮下沉并降低阴影，松开后回弹，增强立体按压感。 */
-private fun View.attachPressDepth(enabledElevation: Float) {
-    setOnTouchListener { view, event ->
-        when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN ->
-                if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+    init {
+        isAllCaps = false
+        textSize = 14f
+        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        letterSpacing = 0.01f
+        minWidth = 0
+        minHeight = 0
+        setPadding(context.dp(12), 0, context.dp(12), 0)
+        stateListAnimator = null
+        setOnTouchListener { view, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
                     view.translationY = context.dp(2).toFloat()
                     view.elevation = context.dp(1).toFloat()
                 }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                view.translationY = 0f
-                view.elevation = enabledElevation
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    view.translationY = 0f
+                    view.elevation = restingElevation
+                }
             }
+            false
         }
-        false
+    }
+
+    fun style(
+        top: Int, bottom: Int, pressedTop: Int, pressedBottom: Int,
+        radiusDp: Int, textColor: Int, strokeColor: Int? = null, elevationDp: Int
+    ) {
+        val radius = context.dp(radiusDp).toFloat()
+        fun layer(t: Int, b: Int) = GradientDrawable(
+            GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(t, b)
+        ).apply {
+            cornerRadius = radius
+            strokeColor?.let { setStroke(context.dp(1), it) }
+        }
+        background = StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_pressed), layer(pressedTop, pressedBottom))
+            addState(intArrayOf(-android.R.attr.state_enabled), layer(pressedTop, pressedBottom))
+            addState(intArrayOf(), layer(top, bottom))
+        }
+        setTextColor(textColor)
+        restingElevation = context.dp(elevationDp).toFloat()
+        elevation = restingElevation
     }
 }
 
-private fun Context.baseButton(text: String, onClick: (View) -> Unit): MaterialButton =
-    MaterialButton(this).apply {
+private fun Context.baseButton(text: String, onClick: (View) -> Unit): ThreeDButton =
+    ThreeDButton(this).apply {
         this.text = text
-        textSize = 14f
-        letterSpacing = 0.01f
-        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        isAllCaps = false
-        minWidth = 0
-        minHeight = 0
-        insetTop = 0
-        insetBottom = 0
-        setPadding(dp(12), 0, dp(12), 0)
         setOnClickListener(onClick)
     }
 
-fun Context.action(text: String, onClick: (View) -> Unit = {}): MaterialButton =
+fun Context.action(text: String, onClick: (View) -> Unit = {}): ThreeDButton =
     baseButton(text, onClick).apply {
-        background = threeDBackground(
-            Color.WHITE, Color.rgb(226, 232, 245),
+        style(Color.WHITE, Color.rgb(226, 232, 245),
             Color.rgb(226, 232, 245), Color.rgb(203, 213, 235),
-            dp(18), Color.rgb(203, 213, 235)
-        )
-        setTextColor(OnLightText)
-        stateListAnimator = null
-        elevation = dp(4).toFloat()
-        attachPressDepth(dp(4).toFloat())
+            18, OnLightText, Color.rgb(203, 213, 235), 4)
     }
 
-fun Context.primaryAction(text: String, onClick: (View) -> Unit = {}): MaterialButton =
+fun Context.primaryAction(text: String, onClick: (View) -> Unit = {}): ThreeDButton =
     baseButton(text, onClick).apply {
-        background = threeDBackground(
-            Color.rgb(111, 132, 255), Color.rgb(64, 78, 226),
+        style(Color.rgb(111, 132, 255), Color.rgb(64, 78, 226),
             Color.rgb(64, 78, 226), Color.rgb(43, 55, 178),
-            dp(20)
-        )
-        setTextColor(OnPrimaryText)
-        stateListAnimator = null
-        elevation = dp(6).toFloat()
-        attachPressDepth(dp(6).toFloat())
+            20, OnPrimaryText, null, 6)
     }
 
-fun Context.glassAction(text: String, onClick: (View) -> Unit = {}): MaterialButton =
+fun Context.glassAction(text: String, onClick: (View) -> Unit = {}): ThreeDButton =
     baseButton(text, onClick).apply {
-        background = threeDBackground(
-            Color.argb(96, 255, 255, 255), Color.argb(60, 255, 255, 255),
+        style(Color.argb(96, 255, 255, 255), Color.argb(60, 255, 255, 255),
             Color.argb(60, 255, 255, 255), Color.argb(40, 255, 255, 255),
-            dp(20), Color.argb(120, 255, 255, 255)
-        )
-        setTextColor(Color.WHITE)
-        stateListAnimator = null
-        elevation = dp(3).toFloat()
-        attachPressDepth(dp(3).toFloat())
+            20, Color.WHITE, Color.argb(120, 255, 255, 255), 3)
     }
 
-/** 统一设置 Chip 的选中/未选中立体样式，供编辑器页签等需要动态切换的地方调用。 */
-fun MaterialButton.applySelectedStyle(selected: Boolean) {
-    val radius = context.dp(22)
+/** 选中/未选中 Chip，与页面按钮共享同一套立体样式。 */
+fun ThreeDButton.applySelectedStyle(selected: Boolean) {
     if (selected) {
-        background = context.threeDBackground(
-            Color.rgb(111, 132, 255), Color.rgb(64, 78, 226),
-            Color.rgb(64, 78, 226), Color.rgb(43, 55, 178), radius
-        )
-        setTextColor(Color.WHITE)
-        stateListAnimator = null
-        elevation = context.dp(5).toFloat()
+        style(Color.rgb(111, 132, 255), Color.rgb(64, 78, 226),
+            Color.rgb(64, 78, 226), Color.rgb(43, 55, 178),
+            22, Color.WHITE, null, 5)
     } else {
-        background = context.threeDBackground(
-            Color.WHITE, Color.rgb(235, 239, 249),
-            Color.rgb(226, 232, 245), Color.rgb(210, 218, 238), radius,
-            Color.rgb(215, 222, 240)
-        )
-        setTextColor(OnLightMuted)
-        stateListAnimator = null
-        elevation = context.dp(2).toFloat()
+        style(Color.WHITE, Color.rgb(235, 239, 249),
+            Color.rgb(226, 232, 245), Color.rgb(210, 218, 238),
+            22, OnLightMuted, Color.rgb(215, 222, 240), 2)
     }
 }
 
-/** Selected/unselected pill chip used for presets and option groups. */
-fun Context.chip(text: String, selected: Boolean, onClick: (View) -> Unit = {}): MaterialButton =
+fun Context.chip(text: String, selected: Boolean, onClick: (View) -> Unit = {}): ThreeDButton =
     baseButton(text, onClick).apply { applySelectedStyle(selected) }
+
+/** 弹窗按钮也使用同一套立体样式，避免系统默认扁平按钮显得不统一。 */
+fun Context.threeDDialog(): AlertDialog.Builder =
+    AlertDialog.Builder(ContextThemeWrapper(this, R.style.QuickIDDialog))
 
 fun Context.sectionTitle(text: String): TextView = label(text, 13f, Muted).apply {
     typeface = Typeface.create(typeface, Typeface.BOLD)

@@ -220,23 +220,33 @@ object ClothingEngine {
         val layerPixels = IntArray(layerW * layerH)
         layer.getPixels(layerPixels, 0, layerW, 0, 0, layerW, layerH)
 
-        val left = (face.centerX - layerW / 2f).roundToInt()
-        val top = (chinY - layerH * 0.02f).roundToInt()
         val w = person.width
         val h = person.height
-        val result = person.copy(Bitmap.Config.ARGB_8888, true)
-        val regionW = minOf(layerW, w - left)
-        val regionH = minOf(layerH, h - top)
-        if (regionW <= 0 || regionH <= 0) return result
+        // 服装图层通常比裁剪画面更宽，必须做交集裁剪后再采样，
+        // 否则 getPixels 的负坐标会直接抛异常导致“换装不能用”。
+        val desiredLeft = (face.centerX - layerW / 2f).roundToInt()
+        val desiredTop = (chinY - layerH * 0.02f).roundToInt()
+        val x0 = maxOf(0, desiredLeft)
+        val y0 = maxOf(0, desiredTop)
+        val x1 = minOf(w, desiredLeft + layerW)
+        val y1 = minOf(h, desiredTop + layerH)
+        val regionW = x1 - x0
+        val regionH = y1 - y0
+        if (regionW <= 0 || regionH <= 0) return person.copy(Bitmap.Config.ARGB_8888, true)
 
+        val result = person.copy(Bitmap.Config.ARGB_8888, true)
         val pixels = IntArray(regionW * regionH)
-        result.getPixels(pixels, 0, regionW, left, top, regionW, regionH)
+        result.getPixels(pixels, 0, regionW, x0, y0, regionW, regionH)
         for (y in 0 until regionH) {
-            val py = top + y
+            val py = y0 + y
             if (py < chinY) continue
+            val layerY = y + (y0 - desiredTop)
+            if (layerY !in 0 until layerH) continue
             for (x in 0 until regionW) {
-                val px = left + x
-                val lp = layerPixels[y * layerW + x]
+                val px = x0 + x
+                val layerX = x + (x0 - desiredLeft)
+                if (layerX !in 0 until layerW) continue
+                val lp = layerPixels[layerY * layerW + layerX]
                 val la = Color.alpha(lp)
                 if (la == 0) continue
                 val matteAlpha = matte.getOrElse(py * w + px) { 0f }.coerceIn(0f, 1f)
@@ -252,7 +262,7 @@ object ClothingEngine {
                 pixels[index] = Color.argb(255, r.coerceIn(0, 255), g.coerceIn(0, 255), b.coerceIn(0, 255))
             }
         }
-        result.setPixels(pixels, 0, regionW, left, top, regionW, regionH)
+        result.setPixels(pixels, 0, regionW, x0, y0, regionW, regionH)
         return result
     }
 }
