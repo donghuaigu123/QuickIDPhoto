@@ -3,6 +3,7 @@ package cn.quickidphoto.app
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -46,6 +47,7 @@ class MainActivity : AppCompatActivity() {
     private var preview: EditorPreviewView? = null
     private var previewStatus: TextView? = null
     private var editorPanel: LinearLayout? = null
+    private val editorTabButtons = mutableListOf<MaterialButton>()
     private var rendered: android.graphics.Bitmap? = null
     private var renderJob: Job? = null
     private var renderVersion = 0
@@ -78,48 +80,68 @@ class MainActivity : AppCompatActivity() {
         renderJob?.cancel()
         val scroll = ScrollView(this)
         val root = vertical(this).apply {
-            setPadding(dp(22), dp(28), dp(22), dp(30))
-            setBackgroundColor(Color.rgb(247, 248, 252))
+            setPadding(dp(20), dp(22), dp(20), dp(30))
+            setBackgroundColor(Surface)
         }
         scroll.addView(root)
-        root.addView(label("QUICK ID PHOTO", 12f, Color.rgb(49, 87, 213)))
-        root.addView(title("快捷证件照"))
-        root.addView(label("专业构图 · 智能换底 · 批量制作", 16f, Color.GRAY).apply {
-            setPadding(0, 0, 0, dp(24))
+        val hero = MaterialCardView(this).apply {
+            radius = dp(30).toFloat()
+            cardElevation = dp(8).toFloat()
+            background = GradientDrawable(GradientDrawable.Orientation.TL_BR,
+                intArrayOf(Color.rgb(76, 96, 255), Color.rgb(139, 92, 246), Color.rgb(20, 184, 166)))
+        }
+        val heroContent = vertical(this).apply { setPadding(dp(24), dp(26), dp(24), dp(26)) }
+        heroContent.addView(label("OFFLINE AI PHOTO STUDIO", 11f, Color.argb(210, 255, 255, 255)).apply {
+            letterSpacing = 0.16f
         })
-        root.addView(homeCard("拍摄证件照", "人形轮廓引导 · 实时人脸构图检测", "开始拍摄") {
+        heroContent.addView(label("快捷证件照", 34f, Color.WHITE).apply {
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            letterSpacing = -0.03f
+            setPadding(0, dp(8), 0, dp(6))
+        })
+        heroContent.addView(label("标准人像构图 · 发丝级边缘优化 · 高清多倍输出", 15f,
+            Color.argb(225, 255, 255, 255)))
+        hero.addView(heroContent)
+        root.addView(hero, LinearLayout.LayoutParams(-1, -1).apply { bottomMargin = dp(18) })
+        root.addView(homeCard("拍摄证件照", "标准比例轮廓引导 · 实时人脸构图检测", "开始拍摄") {
             cameraLauncher.launch(Intent(this, CameraActivity::class.java).putExtra("spec", PhotoSpec.presets.indexOf(spec)))
         })
-        root.addView(homeCard("从相册制作", "自动识别人脸，精细调整每一处细节", "选择单张照片") {
+        root.addView(homeCard("从相册制作", "自动识别人脸，精细调整发丝边缘与高清细节", "选择单张照片") {
             singlePicker.launch("image/*")
         })
-        root.addView(homeCard("批量处理", "统一规格、背景和美颜参数，一次导出多张", "选择多张照片") {
+        root.addView(homeCard("批量处理", "统一规格、背景、构图和美颜参数，一次导出多张", "选择多张照片") {
             batchPicker.launch(arrayOf("image/*"))
         })
-        root.addView(label("核心能力", 19f).apply { setPadding(0, dp(22), 0, dp(10)) })
+        root.addView(label("核心能力", 20f).apply {
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setPadding(dp(4), dp(22), 0, dp(10))
+        })
         root.addView(label(
-            "• 15 种常见规格与自定义像素 / DPI\n" +
-            "• 人脸自动定位，脸部占比、头顶留白、水平位置可调\n" +
-            "• 本地 AI 人像分割，纯色 / 透明背景与边缘精修\n" +
-            "• 磨皮、肤色提亮、锐化、亮度、对比度、白平衡\n" +
-            "• JPG / PNG 导出、六寸相纸排版与系统分享\n\n" +
+            "• 15 种规格与自定义像素 / DPI\n" +
+            "• 人脸自动定位，头部比例、留白和水平位置可调\n" +
+            "• 高分辨率本地人像分割，边缘保真与背景去污染\n" +
+            "• Lanczos-3 高清重采样，支持 1x / 2x / 3x 输出\n" +
+            "• 磨皮、提亮、红润、锐化、白平衡与精细调色\n" +
+            "• JPG / PNG、六寸相纸排版与系统分享\n\n" +
             "所有照片均在本机处理，不上传服务器。不同机构可能有特殊要求，请以官方最新公告为准。",
-            14f, Color.DKGRAY
-        ).apply { setLineSpacing(0f, 1.35f) })
+            14f, Muted
+        ).apply { setLineSpacing(0f, 1.38f); setPadding(dp(6), 0, dp(6), 0) })
         setContentView(scroll)
     }
 
     private fun homeCard(title: String, subtitle: String, button: String, onClick: (View) -> Unit): View {
         val card = MaterialCardView(this).apply {
-            radius = dp(18).toFloat()
-            cardElevation = dp(2).toFloat()
+            radius = dp(26).toFloat()
+            cardElevation = dp(3).toFloat()
             setCardBackgroundColor(Color.WHITE)
+            strokeColor = Color.rgb(228, 233, 244)
+            strokeWidth = dp(1)
             useCompatPadding = true
         }
-        val content = vertical(this).apply { setPadding(dp(18), dp(18), dp(18), dp(18)) }
-        content.addView(label(title, 19f).apply { setTypeface(typeface, android.graphics.Typeface.BOLD) })
-        content.addView(label(subtitle, 13f, Color.GRAY).apply { setPadding(0, dp(6), 0, dp(12)) })
-        content.addView(action(button, onClick))
+        val content = vertical(this).apply { setPadding(dp(20), dp(20), dp(20), dp(20)) }
+        content.addView(label(title, 20f, Ink).apply { setTypeface(typeface, android.graphics.Typeface.BOLD) })
+        content.addView(label(subtitle, 13f, Muted).apply { setPadding(0, dp(7), 0, dp(14)) })
+        content.addView(primaryAction(button, onClick), LinearLayout.LayoutParams(-1, dp(52)))
         card.addView(content)
         return card
     }
@@ -148,12 +170,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showEditor() {
-        val root = vertical(this).apply { setBackgroundColor(Color.rgb(247, 248, 252)) }
-        val toolbar = horizontal(this).apply { setPadding(dp(6), dp(4), dp(6), dp(4)) }
-        toolbar.addView(action("‹ 首页") { showHome() }, LinearLayout.LayoutParams(0, dp(54), 1f))
-        toolbar.addView(label("专业证件照编辑", 18f).apply { gravity = Gravity.CENTER },
-            LinearLayout.LayoutParams(0, dp(54), 2f))
-        toolbar.addView(action("保存") { savePhoto() }, LinearLayout.LayoutParams(0, dp(54), 1f))
+        val root = vertical(this).apply { setBackgroundColor(Surface) }
+        val toolbar = horizontal(this).apply { setPadding(dp(10), dp(8), dp(10), dp(6)) }
+        toolbar.addView(action("‹ 首页") { showHome() }, LinearLayout.LayoutParams(0, dp(52), 1f))
+        toolbar.addView(label("专业证件照编辑", 19f, Ink).apply {
+            gravity = Gravity.CENTER
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+        }, LinearLayout.LayoutParams(0, dp(52), 2f))
+        toolbar.addView(primaryAction("保存") { savePhoto() }, LinearLayout.LayoutParams(0, dp(52), 1f))
         root.addView(toolbar)
 
         preview = EditorPreviewView(this).apply {
@@ -166,30 +190,68 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(preview, LinearLayout.LayoutParams(-1, 0, 1f))
         previewStatus = label(if (face == null) "未检测到人脸，已使用居中裁剪；可手动拖动调整" else
-            "已自动定位人脸 · 单指拖动微调 · 双指缩放脸部占比", 12f, Color.GRAY).apply {
+            "已自动定位人脸 · 单指拖动微调 · 双指缩放脸部占比", 12f, Muted).apply {
             gravity = Gravity.CENTER
             setPadding(dp(8), dp(5), dp(8), dp(5))
         }
         root.addView(previewStatus)
         root.addView(editorTabs())
-        editorPanel = vertical(this).apply { setPadding(dp(14), dp(4), dp(14), dp(8)) }
+        editorPanel = vertical(this).apply { setPadding(dp(16), dp(10), dp(16), dp(12)) }
         val panelScroll = ScrollView(this).apply { addView(editorPanel) }
-        root.addView(panelScroll, LinearLayout.LayoutParams(-1, dp(252)))
+        val panelCard = MaterialCardView(this).apply {
+            radius = dp(28).toFloat()
+            cardElevation = dp(3).toFloat()
+            setCardBackgroundColor(Color.WHITE)
+            strokeColor = Color.rgb(230, 235, 245)
+            strokeWidth = dp(1)
+            addView(panelScroll)
+        }
+        root.addView(panelCard, LinearLayout.LayoutParams(-1, dp(260)).apply {
+            leftMargin = dp(10); rightMargin = dp(10); bottomMargin = dp(10)
+        })
         setContentView(root)
         showEditorTab(0)
     }
 
     private fun editorTabs(): View {
-        val scroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+        val scroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            setPadding(dp(8), 0, dp(8), dp(6))
+        }
         val row = horizontal(this)
+        editorTabButtons.clear()
         listOf("智能构图", "抠图换底", "美颜精修", "光影调色", "输出排版").forEachIndexed { index, name ->
-            row.addView(action(name) { showEditorTab(index) }, LinearLayout.LayoutParams(dp(112), dp(50)))
+            val button = action(name) { showEditorTab(index) }
+            editorTabButtons.add(button)
+            row.addView(button, LinearLayout.LayoutParams(dp(116), dp(48)).apply {
+                leftMargin = dp(4); rightMargin = dp(4)
+            })
         }
         scroll.addView(row)
         return scroll
     }
 
+    private fun updateEditorTabs(selected: Int) {
+        editorTabButtons.forEachIndexed { index, button ->
+            if (index == selected) {
+                button.background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+                    intArrayOf(Primary, PrimaryDeep)).apply { cornerRadius = dp(20).toFloat() }
+                button.setTextColor(Color.WHITE)
+                button.elevation = dp(4).toFloat()
+            } else {
+                button.background = GradientDrawable().apply {
+                    cornerRadius = dp(20).toFloat()
+                    setColor(Color.WHITE)
+                    setStroke(dp(1), Color.rgb(224, 230, 242))
+                }
+                button.setTextColor(Muted)
+                button.elevation = 0f
+            }
+        }
+    }
+
     private fun showEditorTab(index: Int) {
+        updateEditorTabs(index)
         val panel = editorPanel ?: return
         panel.removeAllViews()
         when (index) {
@@ -266,20 +328,22 @@ class MainActivity : AppCompatActivity() {
         panel.addView(scroll)
         slider(panel, "边缘柔化", 0, 100, settings.edgeFeather, "") { settings.edgeFeather = it }
         slider(panel, "轮廓收缩 / 扩展", -50, 50, settings.edgeShift, "") { settings.edgeShift = it }
-        panel.addView(label("提示：透明背景请使用 PNG；JPG 不支持透明通道。", 12f, Color.GRAY))
+        slider(panel, "发丝细节保留", 0, 100, settings.hairDetail, "") { settings.hairDetail = it }
+        panel.addView(label("发丝细节越高，头发边缘越锐利通透；柔化则让过渡更自然。透明背景请使用 PNG。", 12f, Muted))
     }
 
     private fun beautyPanel(panel: LinearLayout) {
         val presets = horizontal(this)
-        presets.addView(action("自然") { applyBeautyPreset(20, 8, 10) }, LinearLayout.LayoutParams(0, dp(48), 1f))
-        presets.addView(action("清透") { applyBeautyPreset(35, 20, 16) }, LinearLayout.LayoutParams(0, dp(48), 1f))
-        presets.addView(action("精致") { applyBeautyPreset(55, 28, 24) }, LinearLayout.LayoutParams(0, dp(48), 1f))
-        presets.addView(action("重置") { applyBeautyPreset(0, 0, 0) }, LinearLayout.LayoutParams(0, dp(48), 1f))
+        presets.addView(action("自然") { applyBeautyPreset(28, 14, 8, 14) }, LinearLayout.LayoutParams(0, dp(48), 1f))
+        presets.addView(action("清透") { applyBeautyPreset(48, 26, 14, 22) }, LinearLayout.LayoutParams(0, dp(48), 1f))
+        presets.addView(action("精致") { applyBeautyPreset(68, 36, 22, 30) }, LinearLayout.LayoutParams(0, dp(48), 1f))
+        presets.addView(action("重置") { applyBeautyPreset(0, 0, 0, 0) }, LinearLayout.LayoutParams(0, dp(48), 1f))
         panel.addView(presets)
         slider(panel, "皮肤平滑（保留非皮肤区域）", 0, 100, settings.smooth, "") { settings.smooth = it }
         slider(panel, "肤色提亮", 0, 100, settings.whiten, "") { settings.whiten = it }
+        slider(panel, "气色红润", 0, 100, settings.rosy, "") { settings.rosy = it }
         slider(panel, "细节锐化", 0, 100, settings.sharpen, "") { settings.sharpen = it }
-        panel.addView(label("建议适度美颜；正式证件照不得改变五官和真实面貌。", 12f, Color.GRAY))
+        panel.addView(label("建议适度美颜；正式证件照不得改变五官和真实面貌。", 12f, Muted))
     }
 
     private fun tonePanel(panel: LinearLayout) {
@@ -305,11 +369,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun outputPanel(panel: LinearLayout) {
-        panel.addView(label("${spec.name} · ${spec.widthPx}×${spec.heightPx}px · ${spec.dpi} DPI", 15f))
+        val scale = settings.outputScale.coerceIn(1, 3)
+        panel.addView(label("${spec.name} · 输出 ${spec.widthPx * scale}×${spec.heightPx * scale}px · ${spec.dpi * scale} DPI", 15f))
+        val hd = horizontal(this)
+        listOf(1 to "标准 1x", 2 to "高清 2x", 3 to "超清 3x").forEach { (value, name) ->
+            hd.addView(action(name) { settings.outputScale = value; showEditorTab(4) }, LinearLayout.LayoutParams(0, dp(48), 1f))
+        }
+        panel.addView(hd)
+        panel.addView(label("高清倍率在标准尺寸基础上放大输出，Lanczos-3 重采样保留细节，画质优于直接放大。", 12f, Muted))
         val format = horizontal(this)
         format.addView(action("JPG") { settings.png = false; refreshPreview() }, LinearLayout.LayoutParams(0, dp(48), 1f))
         format.addView(action("PNG") { settings.png = true; refreshPreview() }, LinearLayout.LayoutParams(0, dp(48), 1f))
-        format.addView(action("保存到相册") { savePhoto() }, LinearLayout.LayoutParams(0, dp(48), 1.4f))
+        format.addView(primaryAction("保存到相册") { savePhoto() }, LinearLayout.LayoutParams(0, dp(48), 1.4f))
         panel.addView(format)
         slider(panel, "JPG 质量", 60, 100, settings.jpegQuality, "") { settings.jpegQuality = it }
         val export = horizontal(this)
@@ -329,6 +400,7 @@ class MainActivity : AppCompatActivity() {
             this.max = max - min
             progress = value - min
         }
+        modernSlider(seek)
         seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 val current = min + progress
@@ -350,7 +422,7 @@ class MainActivity : AppCompatActivity() {
             delay(if (settings.keepOriginalBackground) 50 else 180)
             try {
                 val output = withContext(Dispatchers.Default) {
-                    processor.render(source, spec, settings.copyValues(), face)
+                    processor.render(source, spec, settings.copyValues(), face, preview = true)
                 }
                 if (version == renderVersion) {
                     rendered = output
@@ -388,8 +460,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun applyBeautyPreset(smooth: Int, whiten: Int, sharpen: Int) {
-        settings.smooth = smooth; settings.whiten = whiten; settings.sharpen = sharpen
+    private fun applyBeautyPreset(smooth: Int, whiten: Int, rosy: Int, sharpen: Int) {
+        settings.smooth = smooth; settings.whiten = whiten; settings.rosy = rosy; settings.sharpen = sharpen
         showEditorTab(2); refreshPreview()
     }
 
@@ -424,24 +496,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun customColorDialog() {
-        val input = EditText(this).apply {
-            setText("#438EDB")
-            inputType = InputType.TYPE_CLASS_TEXT
-            hint = "#RRGGBB"
+        val picker = VisualColorPickerView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(-1, dp(360))
+            setColor(if (settings.keepOriginalBackground) Color.rgb(67, 142, 219) else settings.backgroundColor)
         }
         val container = FrameLayout(this).apply {
-            setPadding(dp(24), 0, dp(24), 0); addView(input)
+            setPadding(dp(18), dp(6), dp(18), 0)
+            addView(picker)
         }
-        AlertDialog.Builder(this).setTitle("输入背景颜色（十六进制）").setView(container)
+        AlertDialog.Builder(this).setTitle("可视化选择背景颜色").setView(container)
             .setPositiveButton("应用") { _, _ ->
-                try {
-                    settings.backgroundColor = Color.parseColor(input.text.toString())
-                    settings.keepOriginalBackground = false
-                    settings.transparentBackground = false
-                    refreshPreview()
-                } catch (_: IllegalArgumentException) {
-                    Toast.makeText(this, "颜色格式应为 #RRGGBB", Toast.LENGTH_SHORT).show()
-                }
+                settings.backgroundColor = picker.selectedColor
+                settings.keepOriginalBackground = false
+                settings.transparentBackground = false
+                refreshPreview()
             }.setNegativeButton("取消", null).show()
     }
 

@@ -12,10 +12,14 @@ import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.google.mlkit.vision.segmentation.Segmentation
 import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.roundToInt
+import kotlin.math.sin
 
 /** All image operations run locally. No photo is uploaded by this class. */
 class IdPhotoProcessor {
@@ -54,7 +58,8 @@ class IdPhotoProcessor {
         source: Bitmap,
         spec: PhotoSpec,
         settings: EditorSettings,
-        face: FaceBox?
+        face: FaceBox?,
+        preview: Boolean = false
     ): Bitmap {
         val crop = FaceCropCalculator.calculate(
             source.width, source.height, spec.aspect, face,
@@ -65,11 +70,12 @@ class IdPhotoProcessor {
         val width = crop.width.roundToInt().coerceIn(1, source.width - left)
         val height = crop.height.roundToInt().coerceIn(1, source.height - top)
         var cropped = Bitmap.createBitmap(source, left, top, width, height)
-        if (cropped.width > 1600 || cropped.height > 1600) {
-            val scale = 1600f / max(cropped.width, cropped.height)
-            cropped = Bitmap.createScaledBitmap(
-                cropped, (cropped.width * scale).roundToInt(),
-                (cropped.height * scale).roundToInt(), true
+        val processingLimit = if (settings.keepOriginalBackground) 3200 else 2800
+        if (cropped.width > processingLimit || cropped.height > processingLimit) {
+            val scale = processingLimit.toFloat() / max(cropped.width, cropped.height)
+            cropped = resizeLanczos3(
+                cropped, max(1, (cropped.width * scale).roundToInt()),
+                max(1, (cropped.height * scale).roundToInt())
             )
         }
         val composited = if (settings.keepOriginalBackground) {
@@ -78,11 +84,14 @@ class IdPhotoProcessor {
             replaceBackground(cropped, settings)
         }
         val beautified = applyBeauty(composited, settings)
-        val scaled = Bitmap.createScaledBitmap(beautified, spec.widthPx, spec.heightPx, true)
+        val effectiveScale = if (preview) 1 else settings.outputScale.coerceIn(1, 3)
+        val targetWidth = spec.widthPx * effectiveScale
+        val targetHeight = spec.heightPx * effectiveScale
+        val scaled = resizeLanczos3(beautified, targetWidth, targetHeight)
         val output = scaled.copy(Bitmap.Config.ARGB_8888, true)
-        output.density = spec.dpi
+        output.density = spec.dpi * effectiveScale
         applyAdjustments(output, settings)
-        if (settings.sharpen > 0) applySharpen(output, settings.sharpen / 100f)
+        if (settings.sharpen > 0) applySharpen(output, settings.sharpen / 100f * 0.9f)
         return output
     }
 
@@ -101,30 +110,117 @@ class IdPhotoProcessor {
             for (i in values.indices) values[i] = buffer.float
             val pixels = IntArray(source.width * source.height)
             source.getPixels(pixels, 0, source.width, 0, 0, source.width, source.height)
-            val softness = (settings.edgeFeather / 100f * 0.45f).coerceAtLeast(0.002f)
-            val threshold = (0.5f - settings.edgeShift / 100f * 0.30f).coerceIn(0.1f, 0.9f)
+
+            val softness = (settings.edgeFeather / 100f * 0.34f).coerceAtLeast(0.002f)
+            val threshold = (0.5f - settings.edgeShift / 100f * 0.30f).coerceIn(0.08f, 0.92f)
+            var alpha = FloatArray(source.width * source.height)
             for (y in 0 until source.height) {
                 val my = y.toFloat() * (mask.height - 1) / max(1, source.height - 1)
                 for (x in 0 until source.width) {
                     val mx = x.toFloat() * (mask.width - 1) / max(1, source.width - 1)
                     val confidence = bilinear(values, mask.width, mask.height, mx, my)
-                    val alpha = ((confidence - threshold + softness) / (2f * softness))
-                        .coerceIn(0f, 1f)
-                    val index = y * source.width + x
-                    val fg = pixels[index]
-                    val bg = if (settings.transparentBackground) 0 else settings.backgroundColor
-                    val outAlpha = if (settings.transparentBackground) (alpha * 255).roundToInt() else 255
-                    val r = (Color.red(fg) * alpha + Color.red(bg) * (1f - alpha)).roundToInt()
-                    val g = (Color.green(fg) * alpha + Color.green(bg) * (1f - alpha)).roundToInt()
-                    val b = (Color.blue(fg) * alpha + Color.blue(bg) * (1f - alpha)).roundToInt()
-                    pixels[index] = Color.argb(outAlpha, r, g, b)
+                    alpha[y * source.width + x] = ((confidence - threshold + softness) /
+                        (2f * softness)).coerceIn(0f, 1f)
                 }
+            }
+            alpha = refineAlpha(alpha, source.width, source.height, settings)
+            val originalBackground = estimateBackground(pixels, alpha)
+            val decontamStrength = settings.hairDetail / 100f * 0.92f
+
+            for (i in pixels.indices) {
+                val a = alpha[i]
+                var foreground = pixels[i]
+                if (originalBackground != null && a in 0.025f..0.975f) {
+                    // Unmix old background spill from semi-transparent hair and clothing edges.
+                    val edgeWeight = (1f - abs(a * 2f - 1f)) * decontamStrength
+                    val invAlpha = 1f / max(a, 0.035f)
+                    val unmixedR = (Color.red(foreground) - (1f - a) * Color.red(originalBackground)) * invAlpha
+                    val unmixedG = (Color.green(foreground) - (1f - a) * Color.green(originalBackground)) * invAlpha
+                    val unmixedB = (Color.blue(foreground) - (1f - a) * Color.blue(originalBackground)) * invAlpha
+                    foreground = Color.argb(
+                        Color.alpha(foreground),
+                        (Color.red(foreground) * (1f - edgeWeight) + unmixedR * edgeWeight)
+                            .roundToInt().coerceIn(0, 255),
+                        (Color.green(foreground) * (1f - edgeWeight) + unmixedG * edgeWeight)
+                            .roundToInt().coerceIn(0, 255),
+                        (Color.blue(foreground) * (1f - edgeWeight) + unmixedB * edgeWeight)
+                            .roundToInt().coerceIn(0, 255)
+                    )
+                }
+                val targetBackground = if (settings.transparentBackground) 0 else settings.backgroundColor
+                val outputAlpha = if (settings.transparentBackground) (a * 255).roundToInt() else 255
+                val r = (Color.red(foreground) * a + Color.red(targetBackground) * (1f - a)).roundToInt()
+                val g = (Color.green(foreground) * a + Color.green(targetBackground) * (1f - a)).roundToInt()
+                val b = (Color.blue(foreground) * a + Color.blue(targetBackground) * (1f - a)).roundToInt()
+                pixels[i] = Color.argb(outputAlpha, r, g, b)
             }
             result.setPixels(pixels, 0, source.width, 0, 0, source.width, source.height)
         } finally {
             segmenter.close()
         }
         return result
+    }
+
+    private fun refineAlpha(raw: FloatArray, width: Int, height: Int, settings: EditorSettings): FloatArray {
+        val radius = (1 + settings.edgeFeather / 38).coerceIn(1, 3)
+        val smoothed = boxBlur(raw, width, height, radius)
+        val detail = settings.hairDetail / 100f
+        val edgeContrast = 1f + detail * 0.18f
+        return FloatArray(raw.size) { i ->
+            val preserved = smoothed[i] + (raw[i] - smoothed[i]) * detail * 0.62f
+            val centered = (preserved - 0.5f) * edgeContrast + 0.5f
+            centered.coerceIn(0f, 1f)
+        }
+    }
+
+    private fun boxBlur(source: FloatArray, width: Int, height: Int, radius: Int): FloatArray {
+        val stride = width + 1
+        val integral = FloatArray((width + 1) * (height + 1))
+        for (y in 1..height) {
+            var rowSum = 0f
+            val sourceOffset = (y - 1) * width
+            val integralOffset = y * stride
+            val previousOffset = (y - 1) * stride
+            for (x in 1..width) {
+                rowSum += source[sourceOffset + x - 1]
+                integral[integralOffset + x] = integral[previousOffset + x] + rowSum
+            }
+        }
+        val output = FloatArray(source.size)
+        for (y in 0 until height) {
+            val top = max(0, y - radius)
+            val bottom = min(height - 1, y + radius)
+            for (x in 0 until width) {
+                val left = max(0, x - radius)
+                val right = min(width - 1, x + radius)
+                val area = (right - left + 1) * (bottom - top + 1)
+                val sum = integral[(bottom + 1) * stride + right + 1] -
+                    integral[top * stride + right + 1] -
+                    integral[(bottom + 1) * stride + left] +
+                    integral[top * stride + left]
+                output[y * width + x] = sum / area
+            }
+        }
+        return output
+    }
+
+    private fun estimateBackground(pixels: IntArray, alpha: FloatArray): Int? {
+        var r = 0.0
+        var g = 0.0
+        var b = 0.0
+        var count = 0
+        var i = 0
+        while (i < pixels.size) {
+            if (alpha[i] < 0.06f) {
+                r += Color.red(pixels[i])
+                g += Color.green(pixels[i])
+                b += Color.blue(pixels[i])
+                count++
+            }
+            i += 2
+        }
+        if (count < 32) return null
+        return Color.rgb((r / count).roundToInt(), (g / count).roundToInt(), (b / count).roundToInt())
     }
 
     private fun bilinear(values: FloatArray, width: Int, height: Int, x: Float, y: Float): Float {
@@ -139,22 +235,123 @@ class IdPhotoProcessor {
         return top * (1f - fy) + bottom * fy
     }
 
+    /** High-quality separable Lanczos-3 resampling, preserving more detail than bilinear scaling. */
+    private fun resizeLanczos3(source: Bitmap, targetWidth: Int, targetHeight: Int): Bitmap {
+        if (source.width == targetWidth && source.height == targetHeight) {
+            return source.copy(Bitmap.Config.ARGB_8888, true)
+        }
+        val srcWidth = source.width
+        val srcHeight = source.height
+        val input = IntArray(srcWidth * srcHeight)
+        source.getPixels(input, 0, srcWidth, 0, 0, srcWidth, srcHeight)
+        val horizontal = IntArray(targetWidth * srcHeight)
+        val xScale = srcWidth.toFloat() / targetWidth
+        for (y in 0 until srcHeight) {
+            val row = y * srcWidth
+            val outRow = y * targetWidth
+            for (x in 0 until targetWidth) {
+                val center = (x + 0.5f) * xScale - 0.5f
+                val start = floor(center).toInt() - 2
+                var a = 0f
+                var r = 0f
+                var g = 0f
+                var b = 0f
+                var weightSum = 0f
+                for (k in 0 until 7) {
+                    val sampleX = start + k
+                    val weight = lanczos(center - sampleX)
+                    if (abs(weight) < 0.0001f) continue
+                    val clampedX = sampleX.coerceIn(0, srcWidth - 1)
+                    val pixel = input[row + clampedX]
+                    a += Color.alpha(pixel) * weight
+                    r += Color.red(pixel) * weight
+                    g += Color.green(pixel) * weight
+                    b += Color.blue(pixel) * weight
+                    weightSum += weight
+                }
+                if (abs(weightSum) < 0.0001f) weightSum = 1f
+                horizontal[outRow + x] = Color.argb(
+                    (a / weightSum).roundToInt().coerceIn(0, 255),
+                    (r / weightSum).roundToInt().coerceIn(0, 255),
+                    (g / weightSum).roundToInt().coerceIn(0, 255),
+                    (b / weightSum).roundToInt().coerceIn(0, 255)
+                )
+            }
+        }
+        val outputPixels = IntArray(targetWidth * targetHeight)
+        val yScale = srcHeight.toFloat() / targetHeight
+        for (y in 0 until targetHeight) {
+            val center = (y + 0.5f) * yScale - 0.5f
+            val start = floor(center).toInt() - 2
+            val row = y * targetWidth
+            for (x in 0 until targetWidth) {
+                var a = 0f
+                var r = 0f
+                var g = 0f
+                var b = 0f
+                var weightSum = 0f
+                for (k in 0 until 7) {
+                    val sampleY = start + k
+                    val weight = lanczos(center - sampleY)
+                    if (abs(weight) < 0.0001f) continue
+                    val clampedY = sampleY.coerceIn(0, srcHeight - 1)
+                    val pixel = horizontal[clampedY * targetWidth + x]
+                    a += Color.alpha(pixel) * weight
+                    r += Color.red(pixel) * weight
+                    g += Color.green(pixel) * weight
+                    b += Color.blue(pixel) * weight
+                    weightSum += weight
+                }
+                if (abs(weightSum) < 0.0001f) weightSum = 1f
+                outputPixels[row + x] = Color.argb(
+                    (a / weightSum).roundToInt().coerceIn(0, 255),
+                    (r / weightSum).roundToInt().coerceIn(0, 255),
+                    (g / weightSum).roundToInt().coerceIn(0, 255),
+                    (b / weightSum).roundToInt().coerceIn(0, 255)
+                )
+            }
+        }
+        return Bitmap.createBitmap(outputPixels, targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+    }
+
+    private fun lanczos(value: Float): Float {
+        val distance = abs(value)
+        if (distance >= 3f) return 0f
+        if (distance < 0.0001f) return 1f
+        val x = value * PI.toFloat()
+        return (3f * sin(x) * sin(x / 3f) / (x * x))
+    }
+
     private fun applyBeauty(source: Bitmap, settings: EditorSettings): Bitmap {
-        if (settings.smooth == 0 && settings.whiten == 0) return source
+        if (settings.smooth == 0 && settings.whiten == 0 && settings.rosy == 0) return source
         val result = source.copy(Bitmap.Config.ARGB_8888, true)
         val pixels = IntArray(result.width * result.height)
         result.getPixels(pixels, 0, result.width, 0, 0, result.width, result.height)
-        val blurredPixels = if (settings.smooth > 0) {
-            val small = Bitmap.createScaledBitmap(
-                result, max(1, result.width / 10), max(1, result.height / 10), true
+        val softPixels = if (settings.smooth > 0) {
+            val fine = Bitmap.createScaledBitmap(
+                result, max(1, result.width / 8), max(1, result.height / 8), true
             )
-            val blurred = Bitmap.createScaledBitmap(small, result.width, result.height, true)
-            IntArray(result.width * result.height).also {
-                blurred.getPixels(it, 0, result.width, 0, 0, result.width, result.height)
+            val broad = Bitmap.createScaledBitmap(
+                result, max(1, result.width / 16), max(1, result.height / 16), true
+            )
+            val fineBlur = Bitmap.createScaledBitmap(fine, result.width, result.height, true)
+            val broadBlur = Bitmap.createScaledBitmap(broad, result.width, result.height, true)
+            val finePixels = IntArray(result.width * result.height)
+            val broadPixels = IntArray(result.width * result.height)
+            fineBlur.getPixels(finePixels, 0, result.width, 0, 0, result.width, result.height)
+            broadBlur.getPixels(broadPixels, 0, result.width, 0, 0, result.width, result.height)
+            IntArray(pixels.size) { i ->
+                Color.argb(
+                    Color.alpha(finePixels[i]),
+                    (Color.red(finePixels[i]) * 0.62f + Color.red(broadPixels[i]) * 0.38f).roundToInt(),
+                    (Color.green(finePixels[i]) * 0.62f + Color.green(broadPixels[i]) * 0.38f).roundToInt(),
+                    (Color.blue(finePixels[i]) * 0.62f + Color.blue(broadPixels[i]) * 0.38f).roundToInt()
+                )
             }
         } else null
-        val smoothAmount = settings.smooth / 100f * 0.85f
-        val whitenAmount = settings.whiten / 100f * 0.16f
+        val smoothAmount = settings.smooth / 100f * 0.95f
+        val whitenAmount = settings.whiten / 100f * 0.28f
+        val rosyAmount = settings.rosy / 100f * 0.24f
         for (i in pixels.indices) {
             val color = pixels[i]
             val r = Color.red(color)
@@ -163,12 +360,12 @@ class IdPhotoProcessor {
             val y = 0.299f * r + 0.587f * g + 0.114f * b
             val cb = 128f - 0.168736f * r - 0.331264f * g + 0.5f * b
             val cr = 128f + 0.5f * r - 0.418688f * g - 0.081312f * b
-            val skin = cb in 77f..127f && cr in 133f..178f && y > 35f
+            val skin = cb in 72f..132f && cr in 128f..184f && y > 28f
             if (!skin) continue
             var nr = r.toFloat()
             var ng = g.toFloat()
             var nb = b.toFloat()
-            blurredPixels?.let {
+            softPixels?.let {
                 nr += (Color.red(it[i]) - nr) * smoothAmount
                 ng += (Color.green(it[i]) - ng) * smoothAmount
                 nb += (Color.blue(it[i]) - nb) * smoothAmount
@@ -176,7 +373,14 @@ class IdPhotoProcessor {
             nr += (255f - nr) * whitenAmount
             ng += (255f - ng) * whitenAmount
             nb += (255f - nb) * whitenAmount
-            pixels[i] = Color.argb(Color.alpha(color), nr.roundToInt(), ng.roundToInt(), nb.roundToInt())
+            val rosyR = min(255f, nr + 34f)
+            val rosyG = min(255f, ng + 4f)
+            val rosyB = min(255f, nb + 10f)
+            nr += (rosyR - nr) * rosyAmount
+            ng += (rosyG - ng) * rosyAmount
+            nb += (rosyB - nb) * rosyAmount
+            pixels[i] = Color.argb(Color.alpha(color), nr.roundToInt().coerceIn(0, 255),
+                ng.roundToInt().coerceIn(0, 255), nb.roundToInt().coerceIn(0, 255))
         }
         result.setPixels(pixels, 0, result.width, 0, 0, result.width, result.height)
         return result

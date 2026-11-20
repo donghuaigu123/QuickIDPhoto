@@ -36,37 +36,68 @@ class IdPhotoOverlayView @JvmOverloads constructor(
         val left = (width - frameWidth) / 2f
         val top = (height - actualHeight) / 2f
         val rect = RectF(left, top, left + frameWidth, top + actualHeight)
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = 4f
-        paint.color = when (framingState) {
-            1 -> Color.rgb(82, 230, 161)
-            2 -> Color.rgb(255, 184, 77)
+        val guideColor = when (framingState) {
+            1 -> Color.rgb(45, 212, 191)
+            2 -> Color.rgb(251, 191, 36)
             else -> Color.WHITE
         }
+
+        // Standard ID-photo composition: roughly 10% headroom, 53% head height,
+        // chin around 64%, shoulders starting around 68% of the frame.
+        paint.style = Paint.Style.FILL
+        paint.color = Color.argb(88, 5, 8, 22)
+        canvas.drawRect(0f, 0f, width.toFloat(), rect.top, paint)
+        canvas.drawRect(0f, rect.bottom, width.toFloat(), height.toFloat(), paint)
+        canvas.drawRect(0f, rect.top, rect.left, rect.bottom, paint)
+        canvas.drawRect(rect.right, rect.top, width.toFloat(), rect.bottom, paint)
+
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 3.5f
+        paint.color = Color.argb(170, 255, 255, 255)
         paint.pathEffect = DashPathEffect(floatArrayOf(18f, 12f), 0f)
-        canvas.drawRoundRect(rect, 24f, 24f, paint)
+        canvas.drawRoundRect(rect, 28f, 28f, paint)
         paint.pathEffect = null
 
-        val headWidth = frameWidth * 0.39f
-        val headHeight = actualHeight * 0.29f
-        val head = RectF((width - headWidth) / 2f, top + actualHeight * 0.13f,
-            (width + headWidth) / 2f, top + actualHeight * 0.13f + headHeight)
-        paint.strokeWidth = 5f
+        val headTop = top + actualHeight * 0.105f
+        val headHeight = actualHeight * 0.53f
+        val headWidth = minOf(frameWidth * 0.58f, headHeight * 0.76f)
+        val centerX = width / 2f
+        val head = RectF(centerX - headWidth / 2f, headTop,
+            centerX + headWidth / 2f, headTop + headHeight)
+        paint.strokeWidth = 5.5f
+        paint.color = guideColor
         canvas.drawOval(head, paint)
 
+        val chinY = head.bottom
+        val shoulderY = top + actualHeight * 0.68f
+        val neckWidth = headWidth * 0.24f
         path.reset()
-        val shoulderY = head.bottom + actualHeight * 0.06f
-        path.moveTo(width / 2f - frameWidth * 0.10f, head.bottom - 4f)
-        path.lineTo(width / 2f - frameWidth * 0.11f, shoulderY)
-        path.cubicTo(width / 2f - frameWidth * 0.20f, shoulderY,
-            left + frameWidth * 0.16f, shoulderY + actualHeight * 0.03f,
-            left + frameWidth * 0.10f, rect.bottom)
-        path.moveTo(width / 2f + frameWidth * 0.10f, head.bottom - 4f)
-        path.lineTo(width / 2f + frameWidth * 0.11f, shoulderY)
-        path.cubicTo(width / 2f + frameWidth * 0.20f, shoulderY,
-            left + frameWidth * 0.84f, shoulderY + actualHeight * 0.03f,
-            left + frameWidth * 0.90f, rect.bottom)
+        path.moveTo(centerX - neckWidth / 2f, chinY - 3f)
+        path.lineTo(centerX - neckWidth / 2f, shoulderY)
+        path.cubicTo(centerX - frameWidth * 0.19f, shoulderY + actualHeight * 0.015f,
+            rect.left + frameWidth * 0.17f, shoulderY + actualHeight * 0.035f,
+            rect.left + frameWidth * 0.105f, rect.bottom)
+        path.lineTo(rect.right - frameWidth * 0.105f, rect.bottom)
+        path.cubicTo(rect.right - frameWidth * 0.17f, shoulderY + actualHeight * 0.035f,
+            centerX + frameWidth * 0.19f, shoulderY + actualHeight * 0.015f,
+            centerX + neckWidth / 2f, shoulderY)
+        path.lineTo(centerX + neckWidth / 2f, chinY - 3f)
+        path.close()
+        paint.style = Paint.Style.FILL
+        paint.color = Color.argb(24, 255, 255, 255)
         canvas.drawPath(path, paint)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 5f
+        paint.color = guideColor
+        canvas.drawPath(path, paint)
+
+        paint.strokeWidth = 2.5f
+        paint.color = Color.argb(135, 255, 255, 255)
+        canvas.drawLine(centerX, rect.top + 18f, centerX, rect.bottom - 18f, paint)
+        canvas.drawLine(head.left, head.top + head.height() * 0.42f,
+            head.right, head.top + head.height() * 0.42f, paint)
+        canvas.drawLine(rect.left + frameWidth * 0.13f, shoulderY,
+            rect.right - frameWidth * 0.13f, shoulderY, paint)
 
         if (gridVisible) {
             paint.color = Color.argb(100, 255, 255, 255)
