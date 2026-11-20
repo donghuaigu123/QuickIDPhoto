@@ -17,7 +17,13 @@ import kotlin.math.max
 class ModnetMatting(context: Context) {
 
     private val appContext = context.applicationContext
-    private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
+    // Loading the ONNX runtime native library must never crash the app: any failure
+    // (missing ABI, extraction problem, low memory) degrades to the ML Kit fallback.
+    private val env: OrtEnvironment? = try {
+        OrtEnvironment.getEnvironment()
+    } catch (error: Throwable) {
+        null
+    }
     private val lock = Any()
 
     @Volatile
@@ -32,11 +38,12 @@ class ModnetMatting(context: Context) {
     fun ensureSession(): Boolean {
         session?.let { return true }
         if (loadFailed) return false
+        val activeEnv = env ?: run { loadFailed = true; return false }
         synchronized(lock) {
             if (session == null && !loadFailed) {
                 session = try {
                     val bytes = appContext.assets.open(MODEL_ASSET).use { it.readBytes() }
-                    env.createSession(bytes)
+                    activeEnv.createSession(bytes)
                 } catch (error: Throwable) {
                     loadFailed = true
                     null
@@ -52,6 +59,7 @@ class ModnetMatting(context: Context) {
      */
     fun matte(source: Bitmap, size: Int = INPUT_SIZE): FloatArray? {
         val active = session ?: return null
+        val activeEnv = env ?: return null
         return try {
             val resized = Bitmap.createScaledBitmap(source, size, size, true)
             val pixels = IntArray(size * size)
@@ -70,7 +78,7 @@ class ModnetMatting(context: Context) {
             buffer.rewind()
 
             val inputName = active.inputNames.first()
-            OnnxTensor.createTensor(env, buffer, longArrayOf(1, 3, size.toLong(), size.toLong()))
+            OnnxTensor.createTensor(activeEnv, buffer, longArrayOf(1, 3, size.toLong(), size.toLong()))
                 .use { input ->
                     active.run(mapOf(inputName to input)).use { result ->
                         val output = result.get(0) as OnnxTensor

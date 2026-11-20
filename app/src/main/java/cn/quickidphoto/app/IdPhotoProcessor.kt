@@ -23,7 +23,10 @@ import kotlin.math.sin
 
 /** All image operations run locally. No photo is uploaded by this class. */
 class IdPhotoProcessor(context: android.content.Context) {
-    private val matting = ModnetMatting(context)
+    // Lazily created so that app startup never touches the ONNX native library;
+    // on devices where it cannot load, everything still works via the ML Kit fallback.
+    private val appContext = context.applicationContext
+    private val matting by lazy { ModnetMatting(appContext) }
 
     // Matte cache: recomputing MODNet on every slider tick is too slow, so the raw
     // alpha is cached and only refinement/compositing re-runs on parameter changes.
