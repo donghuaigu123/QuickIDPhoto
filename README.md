@@ -8,15 +8,24 @@
 
 ## 功能
 
-- **智能构图**：本地 ML Kit 人脸检测，按目标宽高比自动裁剪；可调脸部占比、头顶留白、水平位置，支持拖动、双指缩放、旋转和镜像。
-- **常见规格**：一寸、大一寸、二寸、小二寸、中国护照、港澳通行证、美国/日本/申根签证、社保卡、驾驶证、考试报名等 15 种预设；支持自定义像素与 72–1200 DPI。
-- **AI 抠图换底**：本地人像分割，边缘 Alpha 精修、发丝细节保留与原背景色去污染；白/蓝/红/灰等预设背景、可视化 HSV 取色器、透明 PNG；可调边缘柔化、轮廓收缩/扩展和发丝细节。
-- **高清输出**：Lanczos-3 高质量重采样，处理链路保持高分辨率，支持 1x / 2x / 3x 高清放大输出。
-- **美颜与调色**：皮肤区域平滑、肤色提亮、气色红润、细节锐化；亮度、对比度、饱和度、色温、色调、阴影、高光和自动白平衡。
-- **相机辅助**：标准证件照比例的人脸椭圆与双肩轮廓、实时人脸居中/距离提示、三分线、3 秒定时、闪光灯、前后摄像头切换。
-- **批量制作**：统一规格、背景、构图和美颜参数；逐张检测人脸并导出，显示成功与失败数量。
-- **输出**：JPG 质量 60–100、PNG、透明通道、系统相册保存与分享、1800×1200px / 300DPI 六寸相纸排版及裁切线。
-- **隐私**：不声明 Internet 权限，不上传照片；读取用户主动选择的照片。Android 10 及以上通过 MediaStore 保存，无需存储权限；仅 Android 8/9 在保存时请求受限存储权限。相机功能单独请求相机权限。
+- **智能拍摄引导**：标准证件照比例人形剪影（头顶留白 8.5%、头高 52%、双肩定位），实时人脸居中/距离提示，网格、定时、闪光灯、前后镜头切换
+- **MODNet 发丝级抠图**：内置 hivision_modnet 模型（ONNX Runtime 本地推理），发丝边缘保真、背景色去污染、边缘柔化/轮廓/发丝细节可调；ML Kit 自动降级
+- **人脸自动构图**：检测最大人脸按规范裁剪，脸部占比、头顶留白、水平位置微调，拖动与双指缩放
+- **背景系统**：纯色预设、可视化 HSV 取色器、透明 PNG、四款渐变背景与自定义双色渐变（复刻 HivisionIDPhotos 美式证件照）
+- **高清输出**：Lanczos-3 重采样，处理链路高分辨率，1x / 2x / 3x 放大输出，DPI 写入文件元数据
+- **文件大小限制**：JPG 质量按目标 KB 自动二分压缩（对应 HivisionIDPhotos `-k` 参数，适配报名系统 20–200KB 要求）
+- **美颜精修**：总强度 + 皮肤平滑、提亮、红润、锐化，自然/清透/精致预设
+- **光影调色**：亮度、对比度、饱和度、色温、色调、阴影、高光、一键自动白平衡
+- **排版照**：六寸/五寸/A4/3R/4R 五种 300DPI 排版，自定义排版底色与裁切辅助线（复刻 HivisionIDPhotos 排版功能）
+- **批量处理**：多张照片统一规格、背景与美颜参数一次导出
+- **隐私**：不声明 Internet 权限，不上传照片；模型与算法全部本机运行
+
+## 致谢
+
+- [HivisionIDPhotos](https://github.com/Zeyi-Lin/HivisionIDPhotos)：hivision_modnet 抠图模型与渐变背景、排版照、KB 限制等功能设计参考（Apache-2.0 代码，模型遵循原项目发布条款）
+- [MODNet](https://github.com/ZHKKKe/MODNet)：人像抠图模型
+- [image-matting](https://github.com/pangxiaobin/image-matting)：批量抠图、结果页换底色与边缘处理思路参考
+- ML Kit、CameraX、ONNX Runtime、AndroidX
 
 ## 系统要求
 
@@ -48,7 +57,8 @@ Release 构建：
 - Kotlin + 原生 Android Views + Material 3
 - CameraX：预览、拍摄、实时帧分析
 - ML Kit Face Detection：人脸定位
-- ML Kit Selfie Segmentation：人像蒙版
+- ONNX Runtime + hivision_modnet（MODNet）：发丝级人像蒙版本地推理
+- ML Kit Selfie Segmentation：抠图降级方案
 - 自研确定性人脸构图算法与 Kotlin 像素级调色/美颜
 - MediaStore + ExifInterface：方向修正和合规保存
 - JUnit：人脸构图边界、比例和偏移测试
@@ -57,12 +67,13 @@ Release 构建：
 app/src/main/java/cn/quickidphoto/app/
 ├── MainActivity.kt             # 首页、编辑器、批量流程与导出
 ├── CameraActivity.kt           # CameraX 拍摄和实时人脸分析
-├── IdPhotoProcessor.kt         # 人像分割、换底、美颜、调色、排版
+├── IdPhotoProcessor.kt         # MODNet 抠图、换底、美颜、调色、排版
+├── ModnetMatting.kt            # ONNX Runtime 发丝级人像分割
 ├── FaceCropCalculator.kt       # 可独立测试的人脸自动构图算法
-├── PhotoRepository.kt          # EXIF 方向修正与 MediaStore 保存
+├── PhotoRepository.kt          # EXIF 方向修正、KB 限制压缩与 MediaStore 保存
 ├── EditorPreviewView.kt        # 编辑预览、拖动、缩放和网格
 ├── VisualColorPickerView.kt    # 可视化 HSV 取色器
-└── IdPhotoOverlayView.kt        # 标准比例人脸/人形定位轮廓
+└── IdPhotoOverlayView.kt        # 标准比例人形定位轮廓
 ```
 
 ## 使用提示

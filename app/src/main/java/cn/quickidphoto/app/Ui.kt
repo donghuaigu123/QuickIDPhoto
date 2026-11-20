@@ -80,6 +80,30 @@ fun Context.glassAction(text: String, onClick: (View) -> Unit = {}): MaterialBut
         setTextColor(Color.WHITE)
     }
 
+/** Selected/unselected pill chip used for presets and option groups. */
+fun Context.chip(text: String, selected: Boolean, onClick: (View) -> Unit = {}): MaterialButton =
+    baseButton(text, onClick).apply {
+        if (selected) {
+            background = pill(intArrayOf(Primary, PrimaryDeep), dp(22))
+            setTextColor(Color.WHITE)
+            elevation = dp(3).toFloat()
+        } else {
+            background = GradientDrawable().apply {
+                cornerRadius = dp(22).toFloat()
+                setColor(Color.WHITE)
+                setStroke(dp(1), Color.rgb(226, 232, 240))
+            }
+            setTextColor(Muted)
+            elevation = 0f
+        }
+    }
+
+fun Context.sectionTitle(text: String): TextView = label(text, 13f, Muted).apply {
+    typeface = Typeface.create(typeface, Typeface.BOLD)
+    letterSpacing = 0.08f
+    setPadding(dp(2), dp(14), 0, dp(8))
+}
+
 fun Context.modernSlider(seekBar: SeekBar) {
     seekBar.progressTintList = ColorStateList.valueOf(Primary)
     seekBar.thumbTintList = ColorStateList.valueOf(PrimaryDeep)

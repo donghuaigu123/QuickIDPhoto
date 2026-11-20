@@ -84,9 +84,12 @@ object PhotoRepository {
         try {
             context.contentResolver.openOutputStream(uri, "w").use { output ->
                 requireNotNull(output)
-                val ok = if (png) bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)
-                else bitmap.compress(Bitmap.CompressFormat.JPEG, settings.jpegQuality, output)
-                if (!ok) error("照片编码失败")
+                if (png) {
+                    val ok = bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)
+                    if (!ok) error("照片编码失败")
+                } else {
+                    encodeJpeg(bitmap, settings.targetKb, settings.jpegQuality, output)
+                }
             }
             if (png) writePngDensity(context, uri, spec.dpi) else writeJpegDensity(context, uri, spec.dpi)
         } catch (error: Throwable) {
@@ -94,6 +97,40 @@ object PhotoRepository {
             throw error
         }
         return uri
+    }
+
+    /**
+     * Encodes JPEG, honoring an optional target file size (KB). When [targetKb] > 0,
+     * quality is bisected between 15 and [maxQuality] to fit the size cap, matching
+     * the behavior of HivisionIDPhotos' `-k` parameter.
+     */
+    private fun encodeJpeg(bitmap: Bitmap, targetKb: Int, maxQuality: Int, output: java.io.OutputStream) {
+        if (targetKb <= 0) {
+            if (!bitmap.compress(Bitmap.CompressFormat.JPEG, maxQuality, output)) error("照片编码失败")
+            return
+        }
+        val targetBytes = targetKb * 1024L
+        var best: ByteArray? = null
+        var low = 15
+        var high = maxQuality.coerceIn(15, 100)
+        repeat(7) {
+            val quality = (low + high) / 2
+            val bytes = ByteArrayOutputStream().use { stream ->
+                if (!bitmap.compress(Bitmap.CompressFormat.JPEG, quality, stream)) error("照片编码失败")
+                stream.toByteArray()
+            }
+            if (bytes.size <= targetBytes) {
+                best = bytes
+                low = quality + 1
+            } else {
+                high = quality - 1
+            }
+        }
+        val fallback = best ?: ByteArrayOutputStream().use { stream ->
+            if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 15, stream)) error("照片编码失败")
+            stream.toByteArray()
+        }
+        output.write(fallback)
     }
 
     private fun writeJpegDensity(context: Context, uri: Uri, dpi: Int) {

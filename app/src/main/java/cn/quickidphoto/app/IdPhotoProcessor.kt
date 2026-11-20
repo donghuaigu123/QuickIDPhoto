@@ -22,7 +22,18 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 
 /** All image operations run locally. No photo is uploaded by this class. */
-class IdPhotoProcessor {
+class IdPhotoProcessor(context: android.content.Context) {
+    private val matting = ModnetMatting(context)
+
+    // Matte cache: recomputing MODNet on every slider tick is too slow, so the raw
+    // alpha is cached and only refinement/compositing re-runs on parameter changes.
+    private var cacheSource: Bitmap? = null
+    private var cacheLeft = -1
+    private var cacheTop = -1
+    private var cacheWidth = -1
+    private var cacheHeight = -1
+    private var cacheAlpha: MatteSource? = null
+
     private val detectorOptions = FaceDetectorOptions.Builder()
         .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
         .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_NONE)
@@ -78,10 +89,11 @@ class IdPhotoProcessor {
                 max(1, (cropped.height * scale).roundToInt())
             )
         }
+        val matte = obtainMatte(source, left, top, width, height, cropped)
         val composited = if (settings.keepOriginalBackground) {
             cropped
         } else {
-            replaceBackground(cropped, settings)
+            replaceBackground(cropped, settings, matte)
         }
         val beautified = applyBeauty(composited, settings)
         val effectiveScale = if (preview) 1 else settings.outputScale.coerceIn(1, 3)
@@ -95,70 +107,161 @@ class IdPhotoProcessor {
         return output
     }
 
-    private fun replaceBackground(source: Bitmap, settings: EditorSettings): Bitmap {
+    private fun replaceBackground(source: Bitmap, settings: EditorSettings, matte: MatteSource): Bitmap {
+        val result = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
+        val pixels = IntArray(source.width * source.height)
+        source.getPixels(pixels, 0, source.width, 0, 0, source.width, source.height)
+
+        val softness = (settings.edgeFeather / 100f * 0.22f).coerceAtLeast(0.002f)
+        val threshold = (0.5f - settings.edgeShift / 100f * 0.30f).coerceIn(0.08f, 0.92f)
+        var alpha = FloatArray(source.width * source.height)
+        for (y in 0 until source.height) {
+            for (x in 0 until source.width) {
+                val confidence = matte.alphaAt(x, y, source.width, source.height)
+                alpha[y * source.width + x] = ((confidence - threshold + softness) /
+                    (2f * softness)).coerceIn(0f, 1f)
+            }
+        }
+        alpha = refineAlpha(alpha, source.width, source.height, settings)
+        val originalBackground = estimateBackground(pixels, alpha)
+        val decontamStrength = settings.hairDetail / 100f * 0.92f
+
+        // Precompute gradient background rows when enabled.
+        val gradientRows = if (settings.gradientBackground) {
+            IntArray(source.height) { y ->
+                val t = y.toFloat() / max(1, source.height - 1)
+                blend(settings.gradientStart, settings.gradientEnd, t)
+            }
+        } else null
+
+        for (i in pixels.indices) {
+            val a = alpha[i]
+            var foreground = pixels[i]
+            if (originalBackground != null && a in 0.025f..0.975f) {
+                // Unmix old background spill from semi-transparent hair and clothing edges.
+                val edgeWeight = (1f - abs(a * 2f - 1f)) * decontamStrength
+                val invAlpha = 1f / max(a, 0.035f)
+                val unmixedR = (Color.red(foreground) - (1f - a) * Color.red(originalBackground)) * invAlpha
+                val unmixedG = (Color.green(foreground) - (1f - a) * Color.green(originalBackground)) * invAlpha
+                val unmixedB = (Color.blue(foreground) - (1f - a) * Color.blue(originalBackground)) * invAlpha
+                foreground = Color.argb(
+                    Color.alpha(foreground),
+                    (Color.red(foreground) * (1f - edgeWeight) + unmixedR * edgeWeight)
+                        .roundToInt().coerceIn(0, 255),
+                    (Color.green(foreground) * (1f - edgeWeight) + unmixedG * edgeWeight)
+                        .roundToInt().coerceIn(0, 255),
+                    (Color.blue(foreground) * (1f - edgeWeight) + unmixedB * edgeWeight)
+                        .roundToInt().coerceIn(0, 255)
+                )
+            }
+            val targetBackground = when {
+                settings.transparentBackground -> 0
+                gradientRows != null -> gradientRows[i / source.width]
+                else -> settings.backgroundColor
+            }
+            val outputAlpha = if (settings.transparentBackground) (a * 255).roundToInt() else 255
+            val r = (Color.red(foreground) * a + Color.red(targetBackground) * (1f - a)).roundToInt()
+            val g = (Color.green(foreground) * a + Color.green(targetBackground) * (1f - a)).roundToInt()
+            val b = (Color.blue(foreground) * a + Color.blue(targetBackground) * (1f - a)).roundToInt()
+            pixels[i] = Color.argb(outputAlpha, r, g, b)
+        }
+        result.setPixels(pixels, 0, source.width, 0, 0, source.width, source.height)
+        return result
+    }
+
+    /** Resolves the raw portrait alpha, preferring MODNet with an ML Kit fallback.
+     *  The matte is cached against the source bitmap and crop rectangle so that
+     *  adjusting sliders only re-runs refinement, not the neural network. */
+    private fun obtainMatte(
+        source: Bitmap, left: Int, top: Int, width: Int, height: Int, cropped: Bitmap
+    ): MatteSource {
+        val cached = cacheAlpha
+        if (cached != null && cacheSource === source &&
+            cacheLeft == left && cacheTop == top &&
+            cacheWidth == width && cacheHeight == height) {
+            return cached
+        }
+        val matte: MatteSource = if (matting.ensureSession()) {
+            matting.matte(cropped)?.let { MatteSource.Modnet(it, ModnetMatting.INPUT_SIZE) }
+                ?: mlkitMatte(cropped)?.let { MatteSource.Full(it) }
+                ?: MatteSource.Full(FloatArray(cropped.width * cropped.height) { 1f })
+        } else {
+            mlkitMatte(cropped)?.let { MatteSource.Full(it) }
+                ?: MatteSource.Full(FloatArray(cropped.width * cropped.height) { 1f })
+        }
+        cacheSource = source
+        cacheLeft = left; cacheTop = top
+        cacheWidth = width; cacheHeight = height
+        cacheAlpha = matte
+        return matte
+    }
+
+    /** Fallback path using ML Kit selfie segmentation (coarse, only when MODNet is unavailable). */
+    private fun mlkitMatte(source: Bitmap): FloatArray? {
         val options = SelfieSegmenterOptions.Builder()
             .setDetectorMode(SelfieSegmenterOptions.SINGLE_IMAGE_MODE)
             .enableRawSizeMask()
             .build()
         val segmenter = Segmentation.getClient(options)
-        val result = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
-        try {
+        return try {
             val mask = Tasks.await(segmenter.process(InputImage.fromBitmap(source, 0)))
             val buffer = mask.buffer
             buffer.rewind()
             val values = FloatArray(mask.width * mask.height)
             for (i in values.indices) values[i] = buffer.float
-            val pixels = IntArray(source.width * source.height)
-            source.getPixels(pixels, 0, source.width, 0, 0, source.width, source.height)
-
-            val softness = (settings.edgeFeather / 100f * 0.34f).coerceAtLeast(0.002f)
-            val threshold = (0.5f - settings.edgeShift / 100f * 0.30f).coerceIn(0.08f, 0.92f)
-            var alpha = FloatArray(source.width * source.height)
+            val full = FloatArray(source.width * source.height)
             for (y in 0 until source.height) {
                 val my = y.toFloat() * (mask.height - 1) / max(1, source.height - 1)
                 for (x in 0 until source.width) {
                     val mx = x.toFloat() * (mask.width - 1) / max(1, source.width - 1)
-                    val confidence = bilinear(values, mask.width, mask.height, mx, my)
-                    alpha[y * source.width + x] = ((confidence - threshold + softness) /
-                        (2f * softness)).coerceIn(0f, 1f)
+                    full[y * source.width + x] = bilinear(values, mask.width, mask.height, mx, my)
                 }
             }
-            alpha = refineAlpha(alpha, source.width, source.height, settings)
-            val originalBackground = estimateBackground(pixels, alpha)
-            val decontamStrength = settings.hairDetail / 100f * 0.92f
-
-            for (i in pixels.indices) {
-                val a = alpha[i]
-                var foreground = pixels[i]
-                if (originalBackground != null && a in 0.025f..0.975f) {
-                    // Unmix old background spill from semi-transparent hair and clothing edges.
-                    val edgeWeight = (1f - abs(a * 2f - 1f)) * decontamStrength
-                    val invAlpha = 1f / max(a, 0.035f)
-                    val unmixedR = (Color.red(foreground) - (1f - a) * Color.red(originalBackground)) * invAlpha
-                    val unmixedG = (Color.green(foreground) - (1f - a) * Color.green(originalBackground)) * invAlpha
-                    val unmixedB = (Color.blue(foreground) - (1f - a) * Color.blue(originalBackground)) * invAlpha
-                    foreground = Color.argb(
-                        Color.alpha(foreground),
-                        (Color.red(foreground) * (1f - edgeWeight) + unmixedR * edgeWeight)
-                            .roundToInt().coerceIn(0, 255),
-                        (Color.green(foreground) * (1f - edgeWeight) + unmixedG * edgeWeight)
-                            .roundToInt().coerceIn(0, 255),
-                        (Color.blue(foreground) * (1f - edgeWeight) + unmixedB * edgeWeight)
-                            .roundToInt().coerceIn(0, 255)
-                    )
-                }
-                val targetBackground = if (settings.transparentBackground) 0 else settings.backgroundColor
-                val outputAlpha = if (settings.transparentBackground) (a * 255).roundToInt() else 255
-                val r = (Color.red(foreground) * a + Color.red(targetBackground) * (1f - a)).roundToInt()
-                val g = (Color.green(foreground) * a + Color.green(targetBackground) * (1f - a)).roundToInt()
-                val b = (Color.blue(foreground) * a + Color.blue(targetBackground) * (1f - a)).roundToInt()
-                pixels[i] = Color.argb(outputAlpha, r, g, b)
-            }
-            result.setPixels(pixels, 0, source.width, 0, 0, source.width, source.height)
+            full
+        } catch (error: Throwable) {
+            null
         } finally {
             segmenter.close()
         }
-        return result
+    }
+
+    private sealed class MatteSource {
+        abstract fun alphaAt(x: Int, y: Int, width: Int, height: Int): Float
+
+        /** Alpha defined at full resolution, index = y * width + x. */
+        class Full(private val alpha: FloatArray) : MatteSource() {
+            override fun alphaAt(x: Int, y: Int, width: Int, height: Int): Float = alpha[y * width + x]
+        }
+
+        /** Alpha defined on a square matte of [size]×[size]; bilinear sampling to target size. */
+        class Modnet(private val alpha: FloatArray, private val size: Int) : MatteSource() {
+            override fun alphaAt(x: Int, y: Int, width: Int, height: Int): Float {
+                val mx = x.toFloat() * (size - 1) / max(1, width - 1)
+                val my = y.toFloat() * (size - 1) / max(1, height - 1)
+                return IdPhotoProcessor.bilinear(alpha, size, size, mx, my)
+            }
+        }
+    }
+
+    companion object {
+        fun bilinear(values: FloatArray, width: Int, height: Int, x: Float, y: Float): Float {
+            val x0 = x.toInt().coerceIn(0, width - 1)
+            val y0 = y.toInt().coerceIn(0, height - 1)
+            val x1 = min(width - 1, x0 + 1)
+            val y1 = min(height - 1, y0 + 1)
+            val fx = x - x0
+            val fy = y - y0
+            val top = values[y0 * width + x0] * (1f - fx) + values[y0 * width + x1] * fx
+            val bottom = values[y1 * width + x0] * (1f - fx) + values[y1 * width + x1] * fx
+            return top * (1f - fy) + bottom * fy
+        }
+
+        fun blend(from: Int, to: Int, t: Float): Int {
+            val r = (Color.red(from) + (Color.red(to) - Color.red(from)) * t).roundToInt()
+            val g = (Color.green(from) + (Color.green(to) - Color.green(from)) * t).roundToInt()
+            val b = (Color.blue(from) + (Color.blue(to) - Color.blue(from)) * t).roundToInt()
+            return Color.rgb(r.coerceIn(0, 255), g.coerceIn(0, 255), b.coerceIn(0, 255))
+        }
     }
 
     private fun refineAlpha(raw: FloatArray, width: Int, height: Int, settings: EditorSettings): FloatArray {
@@ -221,18 +324,6 @@ class IdPhotoProcessor {
         }
         if (count < 32) return null
         return Color.rgb((r / count).roundToInt(), (g / count).roundToInt(), (b / count).roundToInt())
-    }
-
-    private fun bilinear(values: FloatArray, width: Int, height: Int, x: Float, y: Float): Float {
-        val x0 = x.toInt().coerceIn(0, width - 1)
-        val y0 = y.toInt().coerceIn(0, height - 1)
-        val x1 = min(width - 1, x0 + 1)
-        val y1 = min(height - 1, y0 + 1)
-        val fx = x - x0
-        val fy = y - y0
-        val top = values[y0 * width + x0] * (1f - fx) + values[y0 * width + x1] * fx
-        val bottom = values[y1 * width + x0] * (1f - fx) + values[y1 * width + x1] * fx
-        return top * (1f - fy) + bottom * fy
     }
 
     /** High-quality separable Lanczos-3 resampling, preserving more detail than bilinear scaling. */
@@ -349,9 +440,10 @@ class IdPhotoProcessor {
                 )
             }
         } else null
-        val smoothAmount = settings.smooth / 100f * 0.95f
-        val whitenAmount = settings.whiten / 100f * 0.28f
-        val rosyAmount = settings.rosy / 100f * 0.24f
+        val master = settings.beautyIntensity / 100f
+        val smoothAmount = settings.smooth / 100f * 0.95f * master
+        val whitenAmount = settings.whiten / 100f * 0.28f * master
+        val rosyAmount = settings.rosy / 100f * 0.24f * master
         for (i in pixels.indices) {
             val color = pixels[i]
             val r = Color.red(color)
@@ -462,29 +554,58 @@ class IdPhotoProcessor {
 }
 
 object LayoutSheetGenerator {
-    /** Creates a 6×4 inch, 300 DPI print sheet with cutting guides. */
-    fun sixInch(photo: Bitmap): Bitmap {
-        val sheet = Bitmap.createBitmap(1800, 1200, Bitmap.Config.ARGB_8888)
+    /** Print sheet presets ported from HivisionIDPhotos, all rendered at 300 DPI. */
+    val layouts = listOf(
+        Triple("六寸相纸", 1800, 1200),
+        Triple("五寸相纸", 1500, 1050),
+        Triple("A4 纸张", 3508, 2480),
+        Triple("3R 相纸", 1050, 1500),
+        Triple("4R 相纸", 1200, 1800)
+    )
+
+    fun sixInch(photo: Bitmap): Bitmap = generate(photo, 0, Color.WHITE)
+
+    /** Arranges photos in a grid that maximizes the count for the sheet size. */
+    fun generate(photo: Bitmap, layoutIndex: Int, backgroundColor: Int): Bitmap {
+        val (name, sheetWidth, sheetHeight) = layouts[layoutIndex.coerceIn(0, layouts.lastIndex)]
+        val sheet = Bitmap.createBitmap(sheetWidth, sheetHeight, Bitmap.Config.ARGB_8888)
         sheet.density = 300
         val canvas = Canvas(sheet)
-        canvas.drawColor(Color.WHITE)
+        canvas.drawColor(backgroundColor)
         val margin = 36
         val gap = 18
-        val photoRatio = photo.width.toFloat() / photo.height
-        val cellHeight = (1200 - margin * 2 - gap) / 2
-        val cellWidth = (cellHeight * photoRatio).roundToInt()
-        val columns = ((1800 - margin * 2 + gap) / (cellWidth + gap)).coerceAtLeast(1)
+        val ratio = photo.width.toFloat() / photo.height
+
+        var best: Triple<Int, Int, Int>? = null // cols, rows, cellHeight
+        for (rows in 1..12) {
+            val cellHeight = (sheetHeight - margin * 2 - gap * (rows - 1)) / rows
+            if (cellHeight <= 0) break
+            val cellWidth = (cellHeight * ratio).roundToInt()
+            if (cellWidth <= 0) continue
+            val cols = (sheetWidth - margin * 2 + gap) / (cellWidth + gap)
+            if (cols <= 0) continue
+            val count = cols * rows
+            val current = best
+            if (current == null || count > current.first * current.second) best = Triple(cols, rows, cellHeight)
+        }
+        val arrangement = best ?: Triple(1, 1, sheetHeight - margin * 2)
+        val cellHeight = arrangement.third
+        val cellWidth = (cellHeight * ratio).roundToInt()
+        val gridWidth = arrangement.first * cellWidth + (arrangement.first - 1) * gap
+        val gridHeight = arrangement.second * cellHeight + (arrangement.second - 1) * gap
+        val offsetX = (sheetWidth - gridWidth) / 2
+        val offsetY = (sheetHeight - gridHeight) / 2
+
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.GRAY
+            color = if (backgroundColor == Color.WHITE) Color.GRAY else Color.argb(120, 255, 255, 255)
             strokeWidth = 2f
             style = Paint.Style.STROKE
             pathEffect = DashPathEffect(floatArrayOf(10f, 8f), 0f)
         }
-        for (row in 0 until 2) {
-            for (column in 0 until columns) {
-                val x = margin + column * (cellWidth + gap)
-                val y = margin + row * (cellHeight + gap)
-                if (x + cellWidth > 1800 - margin) continue
+        for (row in 0 until arrangement.second) {
+            for (column in 0 until arrangement.first) {
+                val x = offsetX + column * (cellWidth + gap)
+                val y = offsetY + row * (cellHeight + gap)
                 canvas.drawBitmap(photo, null, android.graphics.Rect(x, y, x + cellWidth, y + cellHeight), null)
                 canvas.drawRect(x.toFloat(), y.toFloat(), (x + cellWidth).toFloat(), (y + cellHeight).toFloat(), paint)
             }
