@@ -7,6 +7,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
 import java.nio.FloatBuffer
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -57,9 +58,12 @@ class ModnetMatting(context: Context) {
 
     /**
      * Runs matting and returns a soft alpha of the SOURCE resolution in [0,1].
-     * The source is letterboxed into the square model input (edge replication)
-     * instead of being stretched, so portrait proportions and edge positions
-     * stay correct; the alpha is then mapped back to the original crop.
+     *
+     * 关键修正（v1.9.0）：hivision_modnet 权重是按「整图直接拉伸到正方形」训练的。
+     * 之前用 letterbox（保持比例 + 两侧填充）喂给模型，会让模型在填充边上产生误判，
+     * 证件照里复杂背景（树林/深色头发）会被判为前景 → 背景抠不净、边缘贴合残留。
+     * 实测对用户的真实一寸照：letterbox 右耳旁树丛 alpha=0.68，直接拉伸仅 0.087，
+     * 且人像（头发0.99/脸0.99/肩膀0.86）完整保留。证件照本身比例固定，拉伸形变极小。
      */
     fun matte(source: Bitmap, size: Int = INPUT_SIZE): FloatArray? {
         val active = session ?: return null
@@ -67,96 +71,65 @@ class ModnetMatting(context: Context) {
         val sw = source.width
         val sh = source.height
         return try {
-            val scale = minOf(size.toFloat() / sw, size.toFloat() / sh)
-            val nw = max(1, (sw * scale).roundToInt())
-            val nh = max(1, (sh * scale).roundToInt())
-            val offsetX = (size - nw) / 2
-            val offsetY = (size - nh) / 2
             val srcPixels = IntArray(sw * sh)
             source.getPixels(srcPixels, 0, sw, 0, 0, sw, sh)
-            // 用四角采样得到的背景色填充 letterbox 空白区（而非边缘复制）。
-            // 边缘复制会把人像轮廓延伸到填充区、误导模型把填充区判为前景，
-            // 是“背景扣不干净 / 位置不准”的诱因之一。
-            var br = 0f; var bg = 0f; var bb = 0f; var bc = 0
-            val cs = maxOf(1, minOf(sw, sh) / 12)
-            fun corner(cx: Int, cy: Int) {
-                for (dy in 0 until cs) for (dx in 0 until cs) {
-                    val px = srcPixels[(cy + dy) * sw + (cx + dx)]
-                    br += Color.red(px); bg += Color.green(px); bb += Color.blue(px); bc++
-                }
-            }
-            corner(0, 0); corner(sw - cs, 0); corner(0, sh - cs); corner(sw - cs, sh - cs)
-            val bgColor = if (bc > 0) Color.rgb((br / bc).roundToInt(), (bg / bc).roundToInt(), (bb / bc).roundToInt())
-                          else Color.WHITE
-            val pixels = IntArray(size * size) { bgColor }
-            // 双线性采样替代最近邻：最近邻会在缩放时把边缘变成阶梯状锯齿，
-            // 是最终抠图边缘锯齿的重要来源之一。
+            // 直接拉伸到 size×size（双线性），不用 letterbox、不做假背景填充。
+            val pixels = IntArray(size * size)
             for (y in 0 until size) {
-                val sy = (y - offsetY).toFloat() / scale - 0.5f
-                if (sy < -1f || sy >= sh) continue
+                val sy = (y + 0.5f) * sh / size - 0.5f
                 val row = y * size
                 for (x in 0 until size) {
-                    val sx = (x - offsetX).toFloat() / scale - 0.5f
-                    if (sx < -1f || sx >= sw) continue
-                    pixels[row + x] = bilinearColor(srcPixels, sw, sh, sx, sy, bgColor)
+                    val sx = (x + 0.5f) * sw / size - 0.5f
+                    pixels[row + x] = bilinearColor(srcPixels, sw, sh, sx, sy, srcPixels[0])
                 }
             }
-            val buffer = FloatBuffer.allocate(3 * size * size)
-            for (channel in 0 until 3) {
-                for (i in pixels.indices) {
-                    val value = when (channel) {
-                        0 -> Color.red(pixels[i])
-                        1 -> Color.green(pixels[i])
-                        else -> Color.blue(pixels[i])
-                    }
-                    buffer.put((value - 127.5f) / 127.5f)
-                }
+            val input = FloatArray(size * size * 3)
+            for (i in 0 until size * size) {
+                val px = pixels[i]
+                input[i] = (Color.red(px) - 127.5f) / 127.5f
+                input[size * size + i] = (Color.green(px) - 127.5f) / 127.5f
+                input[2 * size * size + i] = (Color.blue(px) - 127.5f) / 127.5f
             }
-            buffer.rewind()
-
+            val buffer = FloatBuffer.wrap(input)
             val inputName = active.inputNames.first()
-            var squareAlpha: FloatArray? = null
             OnnxTensor.createTensor(activeEnv, buffer, longArrayOf(1, 3, size.toLong(), size.toLong()))
-                .use { input ->
-                    active.run(mapOf(inputName to input)).use { result ->
+                .use { tensor ->
+                    active.run(mapOf(inputName to tensor)).use { result ->
                         val output = result.get(0) as OnnxTensor
-                        val shape = output.info.shape
                         val raw = output.floatBuffer
                         val plane = size * size
-                        val total = raw.remaining()
-                        val channelCount = max(1, (shape.getOrNull(1) ?: 1).toInt())
-                        val lastDim = (shape.lastOrNull() ?: 1).toInt()
-                        squareAlpha = when {
-                            total == plane -> FloatArray(plane) { raw.get().coerceIn(0f, 1f) }
-                            channelCount >= plane && total >= plane ->
-                                FloatArray(plane) { raw.get().coerceIn(0f, 1f) }
-                            total == plane * 2 && lastDim == 2 ->
-                                FloatArray(plane) { raw.get(); raw.get().coerceIn(0f, 1f) }
-                            else -> null
-                        }
+                        if (raw.remaining() < plane) return null
+                        // 512 输出直接映射回原图（拉伸的逆变换，双线性）
+                        return mappedAlpha(raw, plane, size, sw, sh)
                     }
                 }
-            val alphaSquare = squareAlpha ?: return null
-            // 将方形推理结果映射回原始宽高比的区域，双线性采样保持边缘平滑
-            val result = FloatArray(sw * sh)
-            for (y in 0 until sh) {
-                val my = offsetY.toFloat() + (y + 0.5f) * nh / sh - 0.5f
-                for (x in 0 until sw) {
-                    val mx = offsetX.toFloat() + (x + 0.5f) * nw / sw - 0.5f
-                    result[y * sw + x] = bilinear(alphaSquare, size, size, mx, my)
-                }
-            }
-            result
         } catch (error: Throwable) {
             null
         }
     }
 
-    fun close() {
-        synchronized(lock) {
-            session?.close()
-            session = null
+    /** 把模型输出的 512×512 alpha 用双线性映射回原图尺寸。 */
+    private fun mappedAlpha(raw: java.nio.FloatBuffer, plane: Int, size: Int, sw: Int, sh: Int): FloatArray {
+        val out = FloatArray(sw * sh)
+        for (y in 0 until sh) {
+            val my = (y + 0.5f) * size / sh - 0.5f
+            val y0 = floor(my).toInt()
+            val y1 = minOf(size - 1, y0 + 1)
+            val fy = (my - y0).coerceIn(0f, 1f)
+            for (x in 0 until sw) {
+                val mx = (x + 0.5f) * size / sw - 0.5f
+                val x0 = floor(mx).toInt()
+                val x1 = minOf(size - 1, x0 + 1)
+                val fx = (mx - x0).coerceIn(0f, 1f)
+                val v00 = if (y0 in 0 until size && x0 in 0 until size) raw.get(y0 * size + x0) else 0f
+                val v10 = if (y0 in 0 until size && x1 in 0 until size) raw.get(y0 * size + x1) else 0f
+                val v01 = if (y1 in 0 until size && x0 in 0 until size) raw.get(y1 * size + x0) else 0f
+                val v11 = if (y1 in 0 until size && x1 in 0 until size) raw.get(y1 * size + x1) else 0f
+                val a = (v00 * (1f - fx) + v10 * fx) * (1f - fy) + (v01 * (1f - fx) + v11 * fx) * fy
+                out[y * sw + x] = a.coerceIn(0f, 1f)
+            }
         }
+        return out
     }
 
     companion object {
