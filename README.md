@@ -10,7 +10,7 @@
 
 同一算法的 Windows 桌面程序，**相册/批量编辑、抠图换底、美颜调色、高清输出、排版照**等功能与 Android v1.9.0 完全一致，并针对电脑使用习惯优化：三栏布局、目录导入缩略图可视化勾选、导出目录自由选择、滚轮缩放/拖拽平移、快捷键与拖拽导入、后台线程渲染不卡顿。绿色便携、无需安装、**Win7 SP1 x64 及以上可用**。v1.9.2 修复了 Win7 因缺少 Universal CRT 无法启动的问题（已内置运行库），并改进了启动失败诊断；v1.9.1 修复了按钮文字对比度与界面美化。
 
-- 下载：`[QuickIDPhoto-Windows-v1.9.2.zip](https://github.com/donghuaigu123/QuickIDPhoto/releases/download/v1.9.1-windows/QuickIDPhoto-Windows-v1.9.2.zip)`，解压后双击 `快捷证件照.exe`
+- 下载：`[QuickIDPhoto-Windows-v1.9.2.zip](https://github.com/donghuaigu123/QuickIDPhoto/releases/download/v1.9.2-windows/QuickIDPhoto-Windows-v1.9.2.zip)`，解压后双击 `快捷证件照.exe`
 - 源码与详细说明：[`windows/`](windows/README.md)
 
 
