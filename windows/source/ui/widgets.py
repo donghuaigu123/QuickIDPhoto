@@ -49,6 +49,11 @@ class SliderRow(QWidget):
     def value(self) -> int:
         return self.slider.value()
 
+    def set_name(self, name: str):
+        """动态更新标题（用于抠图滑块在保留原背景时标注「换底时有效」）。"""
+        self.name = name
+        self._update_caption(self.slider.value())
+
     def set_value(self, value: int):
         self.slider.blockSignals(True)
         self.slider.setValue(max(self.minimum, min(self.maximum, value)))

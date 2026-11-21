@@ -2,17 +2,23 @@
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**[下载 Android APK](https://github.com/donghuaigu123/QuickIDPhoto/releases/download/v2.1.0/QuickIDPhoto-v2.1.0.apk)** · **[下载 Windows 版](https://github.com/donghuaigu123/QuickIDPhoto/releases/tag/v2.1.0-windows)** · **[项目仓库](https://github.com/donghuaigu123/QuickIDPhoto)**
+**[下载 Android APK](https://github.com/donghuaigu123/QuickIDPhoto/releases/download/v2.2.0/QuickIDPhoto-v2.2.0.apk)** · **[下载 Windows 版](https://github.com/donghuaigu123/QuickIDPhoto/releases/tag/v2.2.0-windows)** · **[项目仓库](https://github.com/donghuaigu123/QuickIDPhoto)**
 
 一款以**隐私、本地处理和专业构图**为核心的开源 Android 证件照工具。支持相册单张编辑、带完整设置与预览的多照片批量处理，以及带参考图样式人形定位轮廓的相机拍摄。
 
-## 🖥️ Windows 桌面版（v2.1.0）
+## 🖥️ Windows 桌面版（v2.2.0）
 
 同一算法的 Windows 桌面程序，**相册/批量编辑、抠图换底、美颜调色、高清输出、排版照**等功能与 Android v1.9.0 完全一致，并针对电脑使用习惯优化：三栏布局、目录导入缩略图可视化勾选、导出目录自由选择、滚轮缩放/拖拽平移、快捷键与拖拽导入、后台线程渲染不卡顿。绿色便携、无需安装、**Win7 SP1 x64 及以上可用**。**v2.0.0（两版同步）**：修复美颜精修后在耳朵/脸旁背景出现**浅白色方块**的问题（人脸矩形框无差别提亮背景所致，改为仅对肤色像素作用的平滑椭圆权重，背景不再被提亮）；Windows 版同时大幅优化性能（预览改轻量渲染、ONNX 限 2 线程、matte 结果缓存、取消堆叠渲染线程、缩放缓存），预览提速约 2 倍且不再卡顿。v1.9.3 修复含中文/空格路径启动失败；v1.9.2 内置 Universal CRT。
 
-- 下载：`[QuickIDPhoto-Windows-v2.1.0.zip](https://github.com/donghuaigu123/QuickIDPhoto/releases/download/v2.1.0-windows/QuickIDPhoto-Windows-v2.1.0.zip)`，解压后双击 `快捷证件照.exe`
+- 下载：`[QuickIDPhoto-Windows-v2.2.0.zip](https://github.com/donghuaigu123/QuickIDPhoto/releases/download/v2.2.0-windows/QuickIDPhoto-Windows-v2.2.0.zip)`，解压后双击 `快捷证件照.exe`
 - 源码与详细说明：[`windows/`](windows/README.md)
 
+
+## v2.2.0 更新（Android + Windows 同步）
+
+- **修复美颜只作用鼻子一小块**：v2.1.0 的肤色判定过窄 + 人脸椭圆半轴只有脸框 0.44/0.46、衰减带 0.22，满权重区仅覆盖鼻周。新版适度放宽肤色判定、椭圆放大到脸框 0.55 半轴、衰减带加宽到 0.28。用用户实拍图定量验证：额头/脸颊/下巴皮肤 93%~100% 被美化，头发/衣服/蓝背景保持 0 不变，整脸均匀过渡无硬边。
+- **修复 Windows 间歇性「保存失败 encoder error -2」**：根因为秒级时间戳导致连续保存文件名重名、文件被占用。新版文件名加毫秒+随机后缀确保唯一、改用原子写（临时文件+os.replace）并失败重试、JPEG 编码加降级;另修复透明背景 3 通道输入的缓冲区错误。连续保存 30 次全部成功且无重名。
+- **抠图滑块行为明确化**：「边缘柔化/轮廓收缩/发丝细节」为抠图专属参数，选择「保留原背景」时会自动禁用并标注「换底时有效」，避免用户误以为滑块失灵。
 
 ## v2.1.0 更新（Android + Windows 同步）
 

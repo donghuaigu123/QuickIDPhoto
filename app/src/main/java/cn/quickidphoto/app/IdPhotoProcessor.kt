@@ -696,18 +696,19 @@ class IdPhotoProcessor(context: android.content.Context) {
         val whitenAmount = settings.whiten / 100f * 0.55f * master
         val rosyAmount = settings.rosy / 100f * 0.45f * master
 
-        // v2.1.0 修复「头发/衣服被一起美化」：v2.0.0 用放宽肤色使全图暖色像素都被美化。
-        // 正确逻辑 = 严格肤色判定 × 人脸椭圆（相乘而非并集）：
-        //   · 椭圆外（头发/衣服/背景）空间权重恒为 0，绝不被美化
-        //   · 椭圆内也须是严格肤色，排除黑发/染发/低饱和衣物
+        // v2.2.0 修复「美颜只作用鼻子一小块」：v2.1.0 肤色判定过窄 + 椭圆半轴仅脸框
+        // 0.44/0.46、衰减带 0.22（满权重区仅鼻周）。新版用用户实拍图扫描验证的参数：
+        //   · 肤色判定适度放宽，覆盖额头/脸颊/下巴的黄种人肤色；
+        //   · 椭圆放大到脸框 0.55 半轴、衰减带加宽到 0.28，满权重区覆盖整张脸；
+        //   · 仍保持「肤色 × 椭圆」相乘：椭圆外（头发/衣服/背景）权重恒为 0。
         val fl = face?.left?.toFloat() ?: -1f
         val ft = face?.top?.toFloat() ?: -1f
         val fr = face?.right?.toFloat() ?: -1f
         val fb = face?.bottom?.toFloat() ?: -1f
         val fcx = (fl + fr) * 0.5f
         val fcy = (ft + fb) * 0.5f
-        val frx = maxOf(1f, (fr - fl) * 0.44f)
-        val fry = maxOf(1f, (fb - ft) * 0.46f)
+        val frx = maxOf(1f, (fr - fl) * 0.55f)
+        val fry = maxOf(1f, (fb - ft) * 0.55f)
         val hasFace = face != null && face.width > 0f && face.height > 0f
 
         for (y in 0 until result.height) {
@@ -720,10 +721,10 @@ class IdPhotoProcessor(context: android.content.Context) {
                 val yv = 0.299f * r + 0.587f * g + 0.114f * b
                 val cb = 128f - 0.168736f * r - 0.331264f * g + 0.5f * b
                 val cr = 128f + 0.5f * r - 0.418688f * g - 0.081312f * b
-                // 严格肤色判定（收敛区间，排除头发/衣物暖色干扰）
-                val strictSkin = cb in 85f..135f && cr in 135f..180f && yv > 55f && yv < 245f &&
-                        r > g + 2 && r > b + 6
-                if (!strictSkin) continue
+                // 放宽肤色判定：覆盖额头/脸颊/下巴的黄种人肤色，仍排除黑发/蓝背景
+                val skin = cb in 72f..148f && cr in 128f..185f && yv > 45f && yv < 252f &&
+                        r >= b + 2 && r >= g - 3
+                if (!skin) continue
                 var regionWeight = 1f
                 // 人脸椭圆相乘：椭圆外恒为 0（头发/衣服/脖颈/背景不受影响）
                 if (hasFace) {
@@ -731,7 +732,7 @@ class IdPhotoProcessor(context: android.content.Context) {
                     val ny = (y - fcy) / fry
                     val dist = kotlin.math.sqrt(nx * nx + ny * ny)
                     if (dist >= 1f) continue
-                    val t = ((1f - dist) / 0.22f).coerceIn(0f, 1f)
+                    val t = ((1f - dist) / 0.28f).coerceIn(0f, 1f)
                     regionWeight = t * t * (3f - 2f * t)
                 }
                 if (regionWeight <= 0f) continue
