@@ -17,13 +17,22 @@ class RenderWorker(QThread):
         self.spec = spec
         self.settings = settings
         self.face = face
+        self._cancelled = False
+
+    def cancel(self):
+        """协作式取消：只置标志，绝不 terminate（原生代码强制终止会死锁）。"""
+        self._cancelled = True
 
     def run(self):
+        if self._cancelled:
+            return
         try:
             result = self.processor.render(self.source, self.spec, self.settings, self.face)
-            self.rendered.emit(result)
+            if not self._cancelled:
+                self.rendered.emit(result)
         except Exception as exc:
-            self.failed.emit(str(exc))
+            if not self._cancelled:
+                self.failed.emit(str(exc))
 
 
 class BatchWorker(QThread):
@@ -78,8 +87,14 @@ class PrintSheetWorker(QThread):
         self.settings = settings
         self.export_dir = export_dir
         self.face = face
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
 
     def run(self):
+        if self._cancelled:
+            return
         try:
             render_settings = self.settings.copy_values()
             render_settings.output_scale = 1  # 排版照按标准尺寸，保证张数合理
@@ -88,9 +103,11 @@ class PrintSheetWorker(QThread):
             sheet = generate_layout(photo[:, :, :3], self.settings.print_layout,
                                     self.settings.print_background_color)
             path = save_print_sheet(sheet, self.export_dir, self.spec, self.settings)
-            self.done.emit(path)
+            if not self._cancelled:
+                self.done.emit(path)
         except Exception as exc:
-            self.failed.emit(str(exc))
+            if not self._cancelled:
+                self.failed.emit(str(exc))
 
 
 class SaveCurrentWorker(QThread):
@@ -105,12 +122,20 @@ class SaveCurrentWorker(QThread):
         self.settings = settings
         self.face = face
         self.export_dir = export_dir
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
 
     def run(self):
+        if self._cancelled:
+            return
         try:
             output = self.processor.render(self.source, self.spec,
                                            self.settings.copy_values(), self.face)
             path = save_image(output, self.export_dir, self.spec, self.settings)
-            self.saved.emit(path)
+            if not self._cancelled:
+                self.saved.emit(path)
         except Exception as exc:
-            self.failed.emit(str(exc))
+            if not self._cancelled:
+                self.failed.emit(str(exc))
