@@ -665,6 +665,144 @@ class IdPhotoProcessor(context: android.content.Context) {
         return (3f * sin(x) * sin(x / 3f) / (x * x))
     }
 
+    /**
+     * v2.3.0 自动面部范围提取：不再用固定椭圆，而是根据照片内容自动分割真实脸型。
+     * 在降采样图上执行（约 400px 长边，速度快）：人脸框内肤色分割 -> 形态学闭运算填掉
+     * 五官/阴影空洞 + 开运算去毛刺 -> 羽化，得到贴合真实脸部轮廓的不规则 mask。
+     * 返回与原图同尺寸的 FloatArray 权重（0~1），框外（头发/衣服/背景）恒为 0。
+     */
+    private fun autoFaceMask(source: Bitmap, face: FaceBox?): FloatArray? {
+        val w = source.width
+        val h = source.height
+        if (face == null || face.width <= 0f || face.height <= 0f) return null
+
+        val ds = max(1f, max(w, h) / 400f)
+        val sw = max(2, (w / ds).roundToInt())
+        val sh = max(2, (h / ds).roundToInt())
+        val small = Bitmap.createScaledBitmap(source, sw, sh, true)
+        val sp = IntArray(sw * sh)
+        small.getPixels(sp, 0, sw, 0, 0, sw, sh)
+
+        // 1) 肤色分割（ROI = 人脸框，略外扩）
+        val l = face.left / ds
+        val t = face.top / ds
+        val rr = face.right / ds
+        val bb = face.bottom / ds
+        val fw = rr - l
+        val fh = bb - t
+        val x0 = max(0, (l - 0.02f * fw).roundToInt())
+        val x1 = min(sw, (rr + 0.02f * fw).roundToInt())
+        val y0 = max(0, (t - 0.03f * fh).roundToInt())
+        val y1 = min(sh, (bb + 0.02f * fh).roundToInt())
+        if (x1 <= x0 || y1 <= y0) return null
+
+        val bin = IntArray(sw * sh)
+        for (y in y0 until y1) {
+            for (x in x0 until x1) {
+                val c = sp[y * sw + x]
+                val r = Color.red(c).toFloat()
+                val g = Color.green(c).toFloat()
+                val b = Color.blue(c).toFloat()
+                val yv = 0.299f * r + 0.587f * g + 0.114f * b
+                val cb = 128f - 0.168736f * r - 0.331264f * g + 0.5f * b
+                val cr = 128f + 0.5f * r - 0.418688f * g - 0.081312f * b
+                val skin = cb in 70f..150f && cr in 125f..185f && yv > 50f && yv < 250f &&
+                        r >= b + 2 && r >= g - 4
+                bin[y * sw + x] = if (skin) 255 else 0
+            }
+        }
+
+        // 2) 形态学：闭运算（膨胀后腐蚀）填洞，开运算（腐蚀后膨胀）去毛刺
+        val ks = max(3, (13 / ds).roundToInt() or 1)
+        val ko = max(3, (5 / ds).roundToInt() or 1)
+        var mor = dilate(bin, sw, sh, ks)
+        mor = erode(mor, sw, sh, ks)
+        mor = erode(mor, sw, sh, ko)
+        mor = dilate(mor, sw, sh, ko)
+
+        // 3) 羽化（可分离盒滤波近似高斯，两次盒滤波）
+        val radius = max(1, (sw / 90f).roundToInt())
+        var blur = boxBlur(mor, sw, sh, radius)
+        blur = boxBlur(blur, sw, sh, radius)
+
+        // 4) 放大回原分辨率（双线性）
+        val full = FloatArray(w * h)
+        for (y in 0 until h) {
+            val sy = y * sh.toFloat() / h
+            val y0i = min(sh - 1, sy.toInt())
+            val y1i = min(sh - 1, y0i + 1)
+            val fy = sy - y0i
+            for (x in 0 until w) {
+                val sx = x * sw.toFloat() / w
+                val x0i = min(sw - 1, sx.toInt())
+                val x1i = min(sw - 1, x0i + 1)
+                val fx = sx - x0i
+                val v00 = blur[y0i * sw + x0i]; val v10 = blur[y0i * sw + x1i]
+                val v01 = blur[y1i * sw + x0i]; val v11 = blur[y1i * sw + x1i]
+                val top = v00 + (v10 - v00) * fx
+                val bot = v01 + (v11 - v01) * fx
+                full[y * w + x] = (top + (bot - top) * fy)
+            }
+        }
+        return full
+    }
+
+    /** 二值图膨胀（方形结构元，半径 r） */
+    private fun dilate(src: IntArray, w: Int, h: Int, r: Int): IntArray {
+        val k = r / 2
+        val out = IntArray(src.size)
+        for (y in 0 until h) {
+            val y0 = max(0, y - k); val y1 = min(h - 1, y + k)
+            for (x in 0 until w) {
+                val x0 = max(0, x - k); val x1 = min(w - 1, x + k)
+                var m = 0
+                for (yy in y0..y1) for (xx in x0..x1) if (src[yy * w + xx] > m) m = src[yy * w + xx]
+                out[y * w + x] = m
+            }
+        }
+        return out
+    }
+
+    /** 二值图腐蚀（方形结构元，半径 r） */
+    private fun erode(src: IntArray, w: Int, h: Int, r: Int): IntArray {
+        val k = r / 2
+        val out = IntArray(src.size)
+        for (y in 0 until h) {
+            val y0 = max(0, y - k); val y1 = min(h - 1, y + k)
+            for (x in 0 until w) {
+                val x0 = max(0, x - k); val x1 = min(w - 1, x + k)
+                var m = 255
+                for (yy in y0..y1) for (xx in x0..x1) if (src[yy * w + xx] < m) m = src[yy * w + xx]
+                out[y * w + x] = m
+            }
+        }
+        return out
+    }
+
+    /** 可分离盒滤波（先横后纵），用于羽化 */
+    private fun boxBlur(src: IntArray, w: Int, h: Int, r: Int): FloatArray {
+        val tmp = FloatArray(src.size)
+        val out = FloatArray(src.size)
+        val inv = 1f / (2 * r + 1)
+        for (y in 0 until h) {
+            var sum = 0f
+            for (x in -r..r) sum += src[y * w + min(w - 1, max(0, x))]
+            for (x in 0 until w) {
+                tmp[y * w + x] = sum * inv
+                sum += src[y * w + min(w - 1, x + r + 1)] - src[y * w + max(0, x - r)]
+            }
+        }
+        for (x in 0 until w) {
+            var sum = 0f
+            for (y in -r..r) sum += tmp[min(h - 1, max(0, y)) * w + x]
+            for (y in 0 until h) {
+                out[y * w + x] = sum * inv
+                sum += tmp[min(h - 1, y + r + 1) * w + x] - tmp[max(0, y - r) * w + x]
+            }
+        }
+        return out
+    }
+
     private fun applyBeauty(source: Bitmap, settings: EditorSettings, face: FaceBox?): Bitmap {
         if (settings.beautyIntensity <= 0 ||
             (settings.smooth == 0 && settings.whiten == 0 && settings.rosy == 0)) return source
@@ -696,46 +834,20 @@ class IdPhotoProcessor(context: android.content.Context) {
         val whitenAmount = settings.whiten / 100f * 0.55f * master
         val rosyAmount = settings.rosy / 100f * 0.45f * master
 
-        // v2.2.0 修复「美颜只作用鼻子一小块」：v2.1.0 肤色判定过窄 + 椭圆半轴仅脸框
-        // 0.44/0.46、衰减带 0.22（满权重区仅鼻周）。新版用用户实拍图扫描验证的参数：
-        //   · 肤色判定适度放宽，覆盖额头/脸颊/下巴的黄种人肤色；
-        //   · 椭圆放大到脸框 0.55 半轴、衰减带加宽到 0.28，满权重区覆盖整张脸；
-        //   · 仍保持「肤色 × 椭圆」相乘：椭圆外（头发/衣服/背景）权重恒为 0。
-        val fl = face?.left?.toFloat() ?: -1f
-        val ft = face?.top?.toFloat() ?: -1f
-        val fr = face?.right?.toFloat() ?: -1f
-        val fb = face?.bottom?.toFloat() ?: -1f
-        val fcx = (fl + fr) * 0.5f
-        val fcy = (ft + fb) * 0.5f
-        val frx = maxOf(1f, (fr - fl) * 0.55f)
-        val fry = maxOf(1f, (fb - ft) * 0.55f)
-        val hasFace = face != null && face.width > 0f && face.height > 0f
+        // v2.3.0 自动面部范围：根据照片内容自动分割真实脸型（不再是固定椭圆）。
+        // autoFaceMask 返回贴合真实脸部轮廓的不规则权重，框外（头发/衣服/背景）恒为 0。
+        val faceMask = autoFaceMask(result, face)
+        if (faceMask == null || faceMask.all { it <= 0f }) return source
 
         for (y in 0 until result.height) {
             for (x in 0 until result.width) {
                 val i = y * result.width + x
+                val regionWeight = faceMask[i]
+                if (regionWeight <= 0f) continue
                 val color = pixels[i]
                 val r = Color.red(color)
                 val g = Color.green(color)
                 val b = Color.blue(color)
-                val yv = 0.299f * r + 0.587f * g + 0.114f * b
-                val cb = 128f - 0.168736f * r - 0.331264f * g + 0.5f * b
-                val cr = 128f + 0.5f * r - 0.418688f * g - 0.081312f * b
-                // 放宽肤色判定：覆盖额头/脸颊/下巴的黄种人肤色，仍排除黑发/蓝背景
-                val skin = cb in 72f..148f && cr in 128f..185f && yv > 45f && yv < 252f &&
-                        r >= b + 2 && r >= g - 3
-                if (!skin) continue
-                var regionWeight = 1f
-                // 人脸椭圆相乘：椭圆外恒为 0（头发/衣服/脖颈/背景不受影响）
-                if (hasFace) {
-                    val nx = (x - fcx) / frx
-                    val ny = (y - fcy) / fry
-                    val dist = kotlin.math.sqrt(nx * nx + ny * ny)
-                    if (dist >= 1f) continue
-                    val t = ((1f - dist) / 0.28f).coerceIn(0f, 1f)
-                    regionWeight = t * t * (3f - 2f * t)
-                }
-                if (regionWeight <= 0f) continue
                 var nr = r.toFloat()
                 var ng = g.toFloat()
                 var nb = b.toFloat()

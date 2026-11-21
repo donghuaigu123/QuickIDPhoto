@@ -27,6 +27,69 @@ def _lantern_resample(image: np.ndarray, width: int, height: int) -> np.ndarray:
     return np.array(pil, copy=True)
 
 
+def _auto_face_mask(rgb: np.ndarray, face) -> np.ndarray:
+    """v2.3.0 自动面部范围提取：不再用固定椭圆，而是根据照片内容自动分割真实脸型。
+
+    算法（降采样执行，速度快，两版通用）：
+      1. 在人脸检测框内做肤色分割（YCbCr + RGB 约束，覆盖黄种人肤色、排除黑发/背景）；
+      2. 形态学闭运算填掉眼睛/眉毛/嘴巴/阴影造成的空洞，开运算去毛刺；
+      3. 高斯羽化得到平滑的不规则脸型 mask。
+    得到的是贴合真实脸部轮廓的权重图（0~1），不同脸型/角度自动适配，
+    且框外（头发轮廓/衣服/背景）权重恒为 0。
+
+    参数:
+      rgb: (h, w, 3) uint8 RGB 图像
+      face: FaceBox 或 None
+    返回:
+      (h, w) float32 权重图，值域 0~1
+    """
+    h, w = rgb.shape[:2]
+    if face is None or face.width <= 0 or face.height <= 0:
+        return np.zeros((h, w), dtype=np.float32)
+
+    # 降采样：mask 在约 400px 长边上计算，速度提升数十倍，视觉无损
+    ds = max(1.0, max(h, w) / 400.0)
+    sw, sh = max(2, int(w / ds)), max(2, int(h / ds))
+    small = cv2.resize(rgb, (sw, sh), interpolation=cv2.INTER_AREA)
+
+    sr, sg, sb = small[:, :, 0].astype(np.float32), small[:, :, 1].astype(np.float32), small[:, :, 2].astype(np.float32)
+    yv = 0.299 * sr + 0.587 * sg + 0.114 * sb
+    cb = 128.0 - 0.168736 * sr - 0.331264 * sg + 0.5 * sb
+    cr = 128.0 + 0.5 * sr - 0.418688 * sg - 0.081312 * sb
+    # 肤色判定：覆盖额头/脸颊/下巴黄种人肤色，排除黑发(暗)、蓝背景(高Cb低cr)、白色眼珠
+    skin = ((cb >= 70) & (cb <= 150) & (cr >= 125) & (cr <= 185) &
+            (yv > 50) & (yv < 250) & (sr >= sb + 2) & (sr >= sg - 4)).astype(np.uint8)
+
+    # 人脸框（缩放到降采样坐标），略微外扩以覆盖发际线内皮肤/下巴，但不过度扩到衣领
+    l = face.left / ds
+    t = face.top / ds
+    rr = face.right / ds
+    bb = face.bottom / ds
+    fw, fh = rr - l, bb - t
+    x0 = max(0, int(l - 0.02 * fw)); x1 = min(sw, int(rr + 0.02 * fw))
+    y0 = max(0, int(t - 0.03 * fh)); y1 = min(sh, int(bb + 0.02 * fh))
+    if x1 <= x0 or y1 <= y0:
+        return np.zeros((h, w), dtype=np.float32)
+    roi = np.zeros((sh, sw), dtype=np.uint8)
+    roi[y0:y1, x0:x1] = 1
+    mask = skin * roi
+
+    # 形态学：闭运算填掉五官/阴影空洞，开运算去毛刺
+    ks = max(3, int(13 / ds) | 1)
+    ko = max(3, int(5 / ds) | 1)
+    kclose = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ks, ks))
+    kopen = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ko, ko))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kclose)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kopen)
+
+    # 高斯羽化，边缘平滑过渡，杜绝硬边
+    sigma = max(0.8, sw / 160.0)
+    small_mask = cv2.GaussianBlur(mask * 255.0, (0, 0), sigma) / 255.0
+    # 放大回原分辨率
+    full = cv2.resize(small_mask, (w, h), interpolation=cv2.INTER_LINEAR)
+    return np.clip(full, 0.0, 1.0).astype(np.float32)
+
+
 def _box_blur(src: np.ndarray, w: int, h: int, radius: int) -> np.ndarray:
     """方形盒滤波（积分图），与 Kotlin boxBlur 等价，O(1) 每像素。"""
     radius = max(0, int(radius))
@@ -465,40 +528,11 @@ class IdPhotoProcessor:
         rosy_amount = settings.rosy / 100.0 * 0.45 * master
 
         r, g, b = original[:, :, 0], original[:, :, 1], original[:, :, 2]
-        yv = 0.299 * r + 0.587 * g + 0.114 * b
-        cb = 128.0 - 0.168736 * r - 0.331264 * g + 0.5 * b
-        cr = 128.0 + 0.5 * r - 0.418688 * g - 0.081312 * b
-        broad_skin = (cb >= 62) & (cb <= 142) & (cr >= 122) & (cr <= 192) & (yv > 24) & (yv < 250)
 
-        # v2.2.0 修复「美颜只作用鼻子一小块」：
-        # v2.1.0 有两个缺陷叠加导致覆盖过小：
-        #   ① strict_skin 过窄（cr>=135 & r>g+2 & r>b+6），亚洲偏黄/偏暗肤色被排除；
-        #   ② 人脸椭圆半轴只有脸框 0.44/0.46，且 smoothstep 衰减带仅 0.22，
-        #      满权重区(dist<0.78)半径≈154×161px，而脸框半宽 224px → 只剩鼻周。
-        # v2.2.0 方案（用用户实拍图扫描验证）：
-        #   ① 肤色判定适度放宽，覆盖额头/脸颊/下巴的黄种人肤色；
-        #   ② 椭圆放大到脸框 0.55 半轴、衰减带加宽到 0.28，满权重区覆盖整张脸；
-        #   ③ 仍保持「肤色 × 椭圆」相乘：椭圆外（头发轮廓/衣服/背景）权重恒为 0。
-        #   实测：皮肤各区权重 0.90~0.98（全覆盖），头发/衣服/蓝背景全部 0.00。
-        skin = (cb >= 72) & (cb <= 148) & (cr >= 128) & (cr <= 185) & \
-               (yv > 45) & (yv < 252) & (r >= b + 2) & (r >= g - 3)
-        region = np.where(skin, 1.0, 0.0).astype(np.float32)
-        if face is not None and face.width > 0 and face.height > 0:
-            ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
-            cx = (face.left + face.right) * 0.5
-            cy = (face.top + face.bottom) * 0.5
-            # 椭圆放大到脸框 0.55 半轴，覆盖额头/脸颊/下巴；衰减带 0.28 让整脸平滑过渡
-            rx = max(1.0, face.width * 0.55)
-            ry = max(1.0, face.height * 0.55)
-            nx = (xs - cx) / rx
-            ny = (ys - cy) / ry
-            dist = np.sqrt(nx * nx + ny * ny)
-            t = np.clip((1.0 - dist) / 0.28, 0.0, 1.0)
-            face_soft = t * t * (3.0 - 2.0 * t)  # smoothstep，边缘平滑到 0
-            region = region * face_soft            # 相乘：椭圆外恒为 0
-        # 轻微羽化消除残留硬边（仅在已限定的区域内，不会扩到背景）
-        region = _box_blur(region, w, h, max(2, min(w, h) // 220))
-        region = np.maximum(region, 0.0)
+        # v2.3.0 自动面部范围提取：不再使用固定椭圆（对不同脸型/角度不通用），
+        # 改为根据照片内容自动分割真实脸型：人脸框内肤色分割 + 形态学填洞去噪 + 羽化。
+        # 得到贴合实际脸部轮廓的不规则 mask；头发/衣服/背景权重恒为 0。
+        region = _auto_face_mask(rgb, face)
         mask = region > 0
         if not np.any(mask):
             return source
