@@ -18,7 +18,7 @@ from .widgets import SliderRow, ChipGroup, DirectoryRow, PreviewPane
 from .pickers import FolderPhotoPicker
 from .workers import RenderWorker, BatchWorker, PrintSheetWorker, SaveCurrentWorker
 
-VERSION = "v1.9.0"
+VERSION = "v1.9.1"
 
 
 class MainWindow(QMainWindow):
@@ -400,9 +400,23 @@ class MainWindow(QMainWindow):
         self.qsettings.setValue("geometry", self.saveGeometry())
         self.qsettings.setValue("export_dir", self.export_row.text())
         self.qsettings.setValue("last_dir", getattr(self, "_last_dir", ""))
+        # 协作式停止所有后台线程并等待其结束，避免“QThread 仍在运行时被销毁”导致退出崩溃
+        workers = set()
         for worker in (self.render_worker, self.batch_worker, self.save_worker, self.print_worker):
-            if worker and hasattr(worker, "cancel"):
+            if worker is not None:
+                workers.add(worker)
+        for worker in list(self.active_workers):
+            workers.add(worker)
+        for worker in workers:
+            if hasattr(worker, "cancel"):
                 worker.cancel()
+        for worker in workers:
+            try:
+                if worker.isRunning():
+                    worker.wait(4000)
+            except Exception:
+                pass
+        self._preview_timer.stop()
         super().closeEvent(event)
 
     def on_export_dir_changed(self, text):
@@ -650,8 +664,22 @@ class MainWindow(QMainWindow):
         if dialog.exec_() == QDialog.Accepted:
             self.spec = PhotoSpec("自定义", w.value() * 25.4 / dpi.value(),
                                   h.value() * 25.4 / dpi.value(), w.value(), h.value(), dpi.value())
-            self.spec_combo.addItem("自定义 · %d×%d" % (w.value(), h.value()))
-            self.spec_combo.setCurrentIndex(self.spec_combo.count() - 1)
+            # 复用唯一的“自定义”条目，避免反复打开对话框时条目不断累积
+            label = "自定义 · %d×%d" % (w.value(), h.value())
+            custom_index = -1
+            for i in range(self.spec_combo.count()):
+                if self.spec_combo.itemText(i).startswith("自定义"):
+                    custom_index = i
+                    break
+            if custom_index >= 0:
+                self.spec_combo.setItemText(custom_index, label)
+            else:
+                custom_index = self.spec_combo.count()
+                self.spec_combo.addItem(label)
+            # on_spec_changed 只认识预设下标；自定义规格在此直接赋值，避免被回调覆盖
+            self.spec_combo.blockSignals(True)
+            self.spec_combo.setCurrentIndex(custom_index)
+            self.spec_combo.blockSignals(False)
             self.schedule_preview()
 
     def custom_color_dialog(self):
