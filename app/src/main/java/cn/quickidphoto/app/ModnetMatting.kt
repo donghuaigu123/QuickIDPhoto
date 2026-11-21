@@ -89,15 +89,16 @@ class ModnetMatting(context: Context) {
             val bgColor = if (bc > 0) Color.rgb((br / bc).roundToInt(), (bg / bc).roundToInt(), (bb / bc).roundToInt())
                           else Color.WHITE
             val pixels = IntArray(size * size) { bgColor }
+            // 双线性采样替代最近邻：最近邻会在缩放时把边缘变成阶梯状锯齿，
+            // 是最终抠图边缘锯齿的重要来源之一。
             for (y in 0 until size) {
-                val sy = ((y - offsetY).toFloat() / scale).roundToInt()
-                if (sy !in 0 until sh) continue
+                val sy = (y - offsetY).toFloat() / scale - 0.5f
+                if (sy < -1f || sy >= sh) continue
                 val row = y * size
-                val srcRow = sy * sw
                 for (x in 0 until size) {
-                    val sx = ((x - offsetX).toFloat() / scale).roundToInt()
-                    if (sx !in 0 until sw) continue
-                    pixels[row + x] = srcPixels[srcRow + sx]
+                    val sx = (x - offsetX).toFloat() / scale - 0.5f
+                    if (sx < -1f || sx >= sw) continue
+                    pixels[row + x] = bilinearColor(srcPixels, sw, sh, sx, sy, bgColor)
                 }
             }
             val buffer = FloatBuffer.allocate(3 * size * size)
@@ -161,6 +162,24 @@ class ModnetMatting(context: Context) {
     companion object {
         private const val MODEL_ASSET = "hivision_modnet.onnx"
         const val INPUT_SIZE = 512
+
+        /** 双线性采样一个 ARGB 像素数组；越界返回 fill 颜色。 */
+        private fun bilinearColor(values: IntArray, w: Int, h: Int, x: Float, y: Float, fill: Int): Int {
+            val x0 = x.toInt()
+            val y0 = y.toInt()
+            val fx = (x - x0).coerceIn(0f, 1f)
+            val fy = (y - y0).coerceIn(0f, 1f)
+            fun at(px: Int, py: Int): Int =
+                if (px in 0 until w && py in 0 until h) values[py * w + px] else fill
+            fun lerp(c1: Int, c2: Int, t: Float): Int = Color.argb(
+                (Color.alpha(c1) + (Color.alpha(c2) - Color.alpha(c1)) * t).roundToInt().coerceIn(0, 255),
+                (Color.red(c1) + (Color.red(c2) - Color.red(c1)) * t).roundToInt().coerceIn(0, 255),
+                (Color.green(c1) + (Color.green(c2) - Color.green(c1)) * t).roundToInt().coerceIn(0, 255),
+                (Color.blue(c1) + (Color.blue(c2) - Color.blue(c1)) * t).roundToInt().coerceIn(0, 255))
+            val top = lerp(at(x0, y0), at(x0 + 1, y0), fx)
+            val bottom = lerp(at(x0, y0 + 1), at(x0 + 1, y0 + 1), fx)
+            return lerp(top, bottom, fy)
+        }
 
         private fun bilinear(values: FloatArray, w: Int, h: Int, x: Float, y: Float): Float {
             val x0 = x.toInt().coerceIn(0, w - 1)

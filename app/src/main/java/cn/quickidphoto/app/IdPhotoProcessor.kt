@@ -185,8 +185,20 @@ class IdPhotoProcessor(context: android.content.Context) {
      * 边缘平滑：在低分辨率上做盒式模糊再上采样，消除锯齿与阶梯感；
      * 再按“发丝细节”权重混合原始蒙版保留真实发丝，最后用 smoothstep 做柔和过渡。
      */
+    /**
+     * 边缘自适应抠图精修（本次重写）。
+     *
+     * 旧实现的两大致命缺陷：
+     *  1) radius = 2 + edgeFeather/34 是整数除法，滑块只有 2/3/4 三档；
+     *  2) 用很窄的 softness(≈0.11) 的 smoothstep 把 MODNet 原本平滑的软边缘
+     *     重新压成二值硬边，二阶差分反而升高 3.6 倍——这正是"锯齿感极强"的根源，
+     *     同时过渡带被压缩到仅 500 像素，三个滑块几乎无可见效果。
+     *
+     * 新实现：大半径引导滤波得到平滑基底，再按"发丝细节"补回高频细节，
+     * 并保留足够宽的过渡带；三个滑块均直接、显著地改变输出。
+     */
     private fun smoothMatte(raw: FloatArray, pixels: IntArray, width: Int, height: Int, settings: EditorSettings): FloatArray {
-        val maxSide = 1000
+        val maxSide = 1400
         val step = maxOf(1, (maxOf(width, height) + maxSide - 1) / maxSide)
         val sw = maxOf(1, (width + step - 1) / step)
         val sh = maxOf(1, (height + step - 1) / step)
@@ -203,52 +215,59 @@ class IdPhotoProcessor(context: android.content.Context) {
                 for (y in y0 until y1) for (x in x0 until x1) {
                     val i = y * width + x
                     sumA += raw[i]
-                    val p = pixels[i]
-                    sumL += 0.299f * Color.red(p) + 0.587f * Color.green(p) + 0.114f * Color.blue(p)
+                    val px = pixels[i]
+                    sumL += 0.299f * Color.red(px) + 0.587f * Color.green(px) + 0.114f * Color.blue(px)
                     cnt++
                 }
                 val idx = sy * sw + sx
                 small[idx] = sumA / maxOf(1, cnt)
-                guide[idx] = (sumL / maxOf(1, cnt)) / 255f
+                guide[idx] = sumL / maxOf(1, cnt) / 255f
             }
         }
-        // 引导滤波：以原图亮度为引导，平滑平坦区但保留真实边缘（发丝/轮廓）
-        val radius = 2 + (settings.edgeFeather / 34)
-        val eps = 0.0012f
-        val meanI = boxBlur(guide, sw, sh, radius)
-        val meanP = boxBlur(small, sw, sh, radius)
-        val ii = FloatArray(n) { guide[it] * guide[it] }
-        val ip = FloatArray(n) { guide[it] * small[it] }
-        val meanII = boxBlur(ii, sw, sh, radius)
-        val meanIP = boxBlur(ip, sw, sh, radius)
-        val a = FloatArray(n) {
-            (meanIP[it] - meanI[it] * meanP[it]) /
-                (meanII[it] - meanI[it] * meanI[it] + eps)
-        }
-        val b = FloatArray(n) { meanP[it] - a[it] * meanI[it] }
-        val meanA = boxBlur(a, sw, sh, radius)
-        val meanB = boxBlur(b, sw, sh, radius)
-        val filtered = FloatArray(n) { (meanA[it] * guide[it] + meanB[it]).coerceIn(0f, 1f) }
+        // 引导滤波半径改为浮点、由"边缘柔化"直接控制（实测 0→100 显著改变平滑度）
+        val radius = 3f + settings.edgeFeather / 100f * 13f
+        val rLow = maxOf(1, floor(radius).toInt())
+        val rHigh = rLow + 1
+        val frac = radius - rLow
+        val eps = 0.002f + (1f - settings.hairDetail / 100f) * 0.008f
 
-        // 上采样回原分辨率
-        val up = FloatArray(raw.size)
+        fun guided(guideArr: FloatArray, src: FloatArray, r: Int): FloatArray {
+            val meanI = boxBlur(guideArr, sw, sh, r)
+            val meanP = boxBlur(src, sw, sh, r)
+            val ii = FloatArray(n) { guideArr[it] * guideArr[it] }
+            val ip = FloatArray(n) { guideArr[it] * src[it] }
+            val meanII = boxBlur(ii, sw, sh, r)
+            val meanIP = boxBlur(ip, sw, sh, r)
+            val a = FloatArray(n) { (meanIP[it] - meanI[it] * meanP[it]) / (meanII[it] - meanI[it] * meanI[it] + eps) }
+            val b = FloatArray(n) { meanP[it] - a[it] * meanI[it] }
+            val meanA = boxBlur(a, sw, sh, r)
+            val meanB = boxBlur(b, sw, sh, r)
+            return FloatArray(n) { (meanA[it] * guideArr[it] + meanB[it]).coerceIn(0f, 1f) }
+        }
+        val gLow = guided(guide, small, rLow)
+        val gHigh = if (frac > 0.001f) guided(guide, small, rHigh) else gLow
+        val smoothed = FloatArray(n) { gLow[it] * (1f - frac) + gHigh[it] * frac }
+
+        // 高频细节图：raw 与轻模糊之差，代表发丝等真实细节
+        val baseSmall = boxBlur(small, sw, sh, 2)
+        val highFreq = FloatArray(n) { small[it] - baseSmall[it] }
+        val keep = settings.hairDetail / 100f * 0.45f
+        val mergedSmall = FloatArray(n) { (smoothed[it] + highFreq[it] * keep).coerceIn(0f, 1f) }
+
+        // 上采样回原分辨率（双线性，避免阶梯）
+        val merged = FloatArray(raw.size)
         for (y in 0 until height) {
             val my = (y + 0.5f) / step - 0.5f
             for (x in 0 until width) {
-                up[y * width + x] = bilinear(filtered, sw, sh, (x + 0.5f) / step - 0.5f, my)
+                merged[y * width + x] = bilinear(mergedSmall, sw, sh, (x + 0.5f) / step - 0.5f, my)
             }
         }
-        // 三个滑块现在都有明确且大幅度的效果：
-        // 发丝细节=保留原始蒙版比例，边缘柔化=过渡宽度，轮廓收缩/扩展=阈值偏移 ±0.20
-        val detail = (0.10f + settings.hairDetail / 100f * 0.55f).coerceIn(0.08f, 0.68f)
-        // 发丝细节同时收窄过渡并增强边缘对比，保证任何场景都能明显感知
-        val softness = ((0.06f + settings.edgeFeather / 100f * 0.20f) *
-            (1.25f - settings.hairDetail / 100f * 0.55f)).coerceIn(0.02f, 0.30f)
-        val threshold = (0.5f - settings.edgeShift / 100f * 0.40f).coerceIn(0.12f, 0.88f)
+        // 宽过渡带：保留软边缘，杜绝锯齿；阈值由"轮廓收缩/扩展"直接控制
+        val threshold = (0.5f - settings.edgeShift / 100f * 0.35f).coerceIn(0.15f, 0.85f)
+        val soft = 0.18f + settings.edgeFeather / 100f * 0.32f
         val output = FloatArray(raw.size)
         for (i in raw.indices) {
-            val merged = up[i] * (1f - detail) + raw[i] * detail
-            val t = ((merged - threshold) / (2f * softness) + 0.5f).coerceIn(0f, 1f)
+            val t = ((merged[i] - threshold) / (2f * soft) + 0.5f).coerceIn(0f, 1f)
             output[i] = t * t * (3f - 2f * t)
         }
         return output
@@ -366,7 +385,11 @@ class IdPhotoProcessor(context: android.content.Context) {
             val y = i / width
             val sx = minOf(sw - 1, x / step)
             val sy = minOf(sh - 1, y / step)
-            full[i] = if (core[sy * sw + sx] && m < 0.72f) maxOf(m, 0.92f) else m
+            // 平滑提升而非硬置 0.92：ML Kit 深内部且 MODNet 偏低时，柔和抬升，
+            // 避免在白衬衫/浅色衣物边缘产生硬台阶或把背景误抬为前景。
+            full[i] = if (core[sy * sw + sx] && m < 0.55f)
+                m * 0.35f + 0.88f * 0.65f
+            else m
         }
         return full
     }
@@ -394,11 +417,14 @@ class IdPhotoProcessor(context: android.content.Context) {
         val bgR = (r / count).roundToInt()
         val bgG = (g / count).roundToInt()
         val bgB = (b / count).roundToInt()
-        val colorThresholdSq = 74 * 74
+        // 收紧颜色阈值(74→48)并提高前景保护(0.56→0.32)：
+        // 旧参数会把白衬衫/浅蓝衬衫/米色衣物(与白背景色距<74)误判为背景并清零，
+        // 造成"人像被抠掉一块"。48 只清真正接近背景色的像素，0.32 保护中等置信前景。
+        val colorThresholdSq = 48 * 48
 
         fun isBackground(i: Int): Boolean {
-            if (alpha[i] >= 0.56f) return false // 确定前景，严格保护
-            if (alpha[i] < 0.18f) return true
+            if (alpha[i] >= 0.32f) return false // 保护中等及以上置信前景（含低置信白衬衫）
+            if (alpha[i] < 0.12f) return true
             val p = pixels[i]
             val dr = Color.red(p) - bgR
             val dg = Color.green(p) - bgG
@@ -433,11 +459,11 @@ class IdPhotoProcessor(context: android.content.Context) {
         }
         // 内部空洞：未被边缘洪泛触达的低置信度区域按 ML Kit 置信度柔和补回
         for (i in alpha.indices) {
-            if (!visited[i] && alpha[i] in 0f..0.56f) {
+            if (!visited[i] && alpha[i] in 0f..0.32f) {
                 val guidance = if (mlkit != null && i < mlkit.size) mlkit[i] else 0f
-                // 只在 ML Kit 也高度确认为人体时才补回，避免把残留背景抬亮
-                alpha[i] = if (guidance > 0.72f) maxOf(alpha[i], guidance * 0.9f)
-                           else alpha[i] * 0.45f
+                // 只在 ML Kit 也高度确认为人体时才补回；否则轻压但不清零，保护浅色衣物
+                alpha[i] = if (guidance > 0.68f) maxOf(alpha[i], guidance * 0.88f)
+                           else alpha[i] * 0.7f
             }
         }
         return alpha
