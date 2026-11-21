@@ -696,13 +696,18 @@ class IdPhotoProcessor(context: android.content.Context) {
         val whitenAmount = settings.whiten / 100f * 0.55f * master
         val rosyAmount = settings.rosy / 100f * 0.45f * master
 
-        // 人脸区域（含下颌/脖颈扩展）作为先验：区域内放宽肤色判定，保证效果覆盖整张脸
-        val fl = face?.left?.toInt() ?: -1
-        val ft = face?.top?.toInt() ?: -1
-        val fr = face?.right?.toInt() ?: -1
-        val fb = face?.bottom?.toInt() ?: -1
-        val padX = maxOf(6, ((fr - fl) * 0.18f).toInt())
-        val padY = maxOf(6, ((fb - ft) * 0.28f).toInt())
+        // v2.0.0 修复「浅白色方块」：旧版用整个人脸矩形(inFace)强制 region=0.55，
+        // 人脸框 padding 延伸到耳朵旁蓝色背景时背景被无差别提亮成白色硬边方块。
+        // 新方案：只对肤色像素作用；人脸框仅用作平滑椭圆先验放宽肤色判定，无矩形硬边，
+        // 非肤色背景像素权重恒为 0，杜绝白块。
+        val fl = face?.left?.toFloat() ?: -1f
+        val ft = face?.top?.toFloat() ?: -1f
+        val fr = face?.right?.toFloat() ?: -1f
+        val fb = face?.bottom?.toFloat() ?: -1f
+        val fcx = (fl + fr) * 0.5f
+        val fcy = (ft + fb) * 0.5f
+        val frx = maxOf(1f, (fr - fl) * 0.62f)
+        val fry = maxOf(1f, (fb - ft) * 0.72f)
 
         for (y in 0 until result.height) {
             for (x in 0 until result.width) {
@@ -714,12 +719,22 @@ class IdPhotoProcessor(context: android.content.Context) {
                 val yv = 0.299f * r + 0.587f * g + 0.114f * b
                 val cb = 128f - 0.168736f * r - 0.331264f * g + 0.5f * b
                 val cr = 128f + 0.5f * r - 0.418688f * g - 0.081312f * b
-                // 放宽肤色判定：YCbCr 常人像区间 + 亮度约束，避免大量像素被排除导致“没效果”
+                // 放宽肤色判定：YCbCr 常人像区间 + 亮度约束
                 val broadSkin = cb in 62f..142f && cr in 122f..192f && yv > 24f && yv < 250f
-                val inFace = face != null && x in (fl - padX)..(fr + padX) && y in (ft - padY)..(fb + padY)
-                if (!broadSkin && !inFace) continue
-                // 人脸区域内即使超出肤色区间也轻度作用（如高光/阴影区），但降低强度避免误伤
-                val regionWeight = if (broadSkin) 1f else 0.55f
+                var regionWeight = if (broadSkin) 1f else 0f
+                // 人脸椭圆内平滑放宽肤色判定（容纳高光/阴影），smoothstep 边缘衰减，无硬边
+                if (face != null && regionWeight == 0f) {
+                    val nx = (x - fcx) / frx
+                    val ny = (y - fcy) / fry
+                    val dist = kotlin.math.sqrt(nx * nx + ny * ny)
+                    if (dist < 1f) {
+                        val t = ((1f - dist) / 0.45f).coerceIn(0f, 1f)
+                        val faceSoft = t * t * (3f - 2f * t)
+                        val relaxed = cb in 55f..152f && cr in 112f..205f && yv > 20f && yv < 252f
+                        if (relaxed) regionWeight = faceSoft * 0.5f
+                    }
+                }
+                if (regionWeight <= 0f) continue
                 var nr = r.toFloat()
                 var ng = g.toFloat()
                 var nb = b.toFloat()

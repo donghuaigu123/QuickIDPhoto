@@ -10,13 +10,14 @@ class RenderWorker(QThread):
     rendered = pyqtSignal(object)
     failed = pyqtSignal(str)
 
-    def __init__(self, processor, source, spec, settings, face, parent=None):
+    def __init__(self, processor, source, spec, settings, face, preview=True, parent=None):
         super().__init__(parent)
         self.processor = processor
         self.source = source
         self.spec = spec
         self.settings = settings
         self.face = face
+        self.preview = preview
         self._cancelled = False
 
     def cancel(self):
@@ -27,7 +28,10 @@ class RenderWorker(QThread):
         if self._cancelled:
             return
         try:
-            result = self.processor.render(self.source, self.spec, self.settings, self.face)
+            # v2.0.0 性能修复：预览必须传 preview=True，避免做 output_scale 高清放大
+            # （此前预览默认 preview=False，按 2~3 倍分辨率渲染，CPU/内存开销翻数倍）
+            result = self.processor.render(self.source, self.spec, self.settings,
+                                           self.face, preview=self.preview)
             if not self._cancelled:
                 self.rendered.emit(result)
         except Exception as exc:

@@ -45,6 +45,11 @@ class ModnetMatting:
                 import onnxruntime as ort
                 opts = ort.SessionOptions()
                 opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                # v2.0.0 性能修复：ONNX 默认在多核机器上开满所有线程（本机 32 核），
+                # 单次推理抢占全部 CPU，导致界面卡顿。限制为 2 线程，交互式预览更跟手，
+                # 512×512 的 MODNet 在该规模下耗时几乎不变，但系统负载大幅下降。
+                opts.intra_op_num_threads = 2
+                opts.inter_op_num_threads = 1
                 with open(self.model_path, "rb") as f:
                     model_bytes = f.read()
                 self._session = ort.InferenceSession(

@@ -18,7 +18,7 @@ from .widgets import SliderRow, ChipGroup, DirectoryRow, PreviewPane
 from .pickers import FolderPhotoPicker
 from .workers import RenderWorker, BatchWorker, PrintSheetWorker, SaveCurrentWorker
 
-VERSION = "v1.9.3"
+VERSION = "v2.0.0"
 
 
 class MainWindow(QMainWindow):
@@ -569,13 +569,18 @@ class MainWindow(QMainWindow):
     def render_current(self):
         # 采用版本号丢弃过期结果，绝不 terminate QThread：
         # 线程中正在执行 NumPy/ONNX 原生代码时强制终止会导致死锁。
+        # v2.0.0 性能修复：启动新预览前先协作式取消仍在运行的旧渲染任务，
+        # 避免拖动滑块时堆积多个 ONNX 推理线程把 CPU 占满造成卡顿。
+        if self.render_worker is not None and self.render_worker.isRunning():
+            self.render_worker.cancel()
         self.render_version += 1
         version = self.render_version
         if not (0 <= self.current_index < len(self.items)):
             return
         item = self.items[self.current_index]
         worker = RenderWorker(self.processor, item["source"], self.spec,
-                              self.editor.copy_values(), item["face"], self)
+                              self.editor.copy_values(), item["face"],
+                              preview=True, parent=self)
         worker.rendered.connect(lambda result, v=version: self.on_rendered(result, v))
         worker.failed.connect(lambda msg, v=version: self._on_render_failed(msg, v))
         self.render_worker = worker

@@ -2,17 +2,22 @@
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**[下载 Android APK](https://github.com/donghuaigu123/QuickIDPhoto/releases/latest)** · **[下载 Windows 版](https://github.com/donghuaigu123/QuickIDPhoto/releases/tag/v1.9.3-windows)** · **[项目仓库](https://github.com/donghuaigu123/QuickIDPhoto)**
+**[下载 Android APK](https://github.com/donghuaigu123/QuickIDPhoto/releases/latest)** · **[下载 Windows 版](https://github.com/donghuaigu123/QuickIDPhoto/releases/tag/v2.0.0-windows)** · **[项目仓库](https://github.com/donghuaigu123/QuickIDPhoto)**
 
 一款以**隐私、本地处理和专业构图**为核心的开源 Android 证件照工具。支持相册单张编辑、带完整设置与预览的多照片批量处理，以及带参考图样式人形定位轮廓的相机拍摄。
 
-## 🖥️ Windows 桌面版（v1.9.3）
+## 🖥️ Windows 桌面版（v2.0.0）
 
-同一算法的 Windows 桌面程序，**相册/批量编辑、抠图换底、美颜调色、高清输出、排版照**等功能与 Android v1.9.0 完全一致，并针对电脑使用习惯优化：三栏布局、目录导入缩略图可视化勾选、导出目录自由选择、滚轮缩放/拖拽平移、快捷键与拖拽导入、后台线程渲染不卡顿。绿色便携、无需安装、**Win7 SP1 x64 及以上可用**。v1.9.3 修复了安装在**含中文或空格路径**下无法启动的问题（启动器宽字符路径被 `%s` 截断，已改为宽字符串拼接并验证）；v1.9.2 内置 Universal CRT 修复 Win7 启动；v1.9.1 修复按钮文字对比度与界面美化。
+同一算法的 Windows 桌面程序，**相册/批量编辑、抠图换底、美颜调色、高清输出、排版照**等功能与 Android v1.9.0 完全一致，并针对电脑使用习惯优化：三栏布局、目录导入缩略图可视化勾选、导出目录自由选择、滚轮缩放/拖拽平移、快捷键与拖拽导入、后台线程渲染不卡顿。绿色便携、无需安装、**Win7 SP1 x64 及以上可用**。**v2.0.0（两版同步）**：修复美颜精修后在耳朵/脸旁背景出现**浅白色方块**的问题（人脸矩形框无差别提亮背景所致，改为仅对肤色像素作用的平滑椭圆权重，背景不再被提亮）；Windows 版同时大幅优化性能（预览改轻量渲染、ONNX 限 2 线程、matte 结果缓存、取消堆叠渲染线程、缩放缓存），预览提速约 2 倍且不再卡顿。v1.9.3 修复含中文/空格路径启动失败；v1.9.2 内置 Universal CRT。
 
-- 下载：`[QuickIDPhoto-Windows-v1.9.3.zip](https://github.com/donghuaigu123/QuickIDPhoto/releases/download/v1.9.3-windows/QuickIDPhoto-Windows-v1.9.3.zip)`，解压后双击 `快捷证件照.exe`
+- 下载：`[QuickIDPhoto-Windows-v2.0.0.zip](https://github.com/donghuaigu123/QuickIDPhoto/releases/download/v2.0.0-windows/QuickIDPhoto-Windows-v2.0.0.zip)`，解压后双击 `快捷证件照.exe`
 - 源码与详细说明：[`windows/`](windows/README.md)
 
+
+## v2.0.0 更新（Android + Windows 同步）
+
+- **修复美颜浅白色方块**：此前美颜精修后，人脸检测矩形框延伸到耳旁背景时，背景像素被无差别提亮，形成明显的浅白色方块导致证件照作废。新版改为「仅对肤色像素作用 + 人脸位置平滑椭圆权重」，背景像素权重恒为 0，方块彻底消失，同时脸颊美颜效果保留。
+- **Windows 性能大幅优化**：预览改用轻量渲染（不再做 2~3 倍高清放大）、ONNX 推理限制为 2 线程不抢占 UI、matte 抠图结果 LRU 缓存（拖动美颜/调色滑块跳过重复推理）、取消堆叠的渲染线程、预览缩放结果缓存。实测预览渲染从约 84ms 降到 38ms，且不再因线程堆积而卡顿。
 
 ## v1.9.0 更新（重要 · 用用户真实失败样图验证修复）
 

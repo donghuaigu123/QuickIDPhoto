@@ -140,10 +140,14 @@ class PreviewCanvas(QWidget):
         self.scale = 1.0
         self.show_grid = False
         self.setMouseTracking(False)
+        # v2.0.0 性能：缓存缩放结果，避免每次重绘（滚动/鼠标移动）都重做高质量缩放
+        self._scaled_cache = None
+        self._scaled_key = None
 
     def set_image(self, image: QImage, scale: float):
         self.image = image
         self.scale = max(0.02, min(12.0, scale))
+        self._scaled_key = None
         if image is None or image.isNull():
             self.resize(320, 420)
         else:
@@ -169,8 +173,12 @@ class PreviewCanvas(QWidget):
         if self.image is not None and not self.image.isNull():
             target = QSize(max(1, int(self.image.width() * self.scale)),
                            max(1, int(self.image.height() * self.scale)))
-            scaled = self.image.scaled(target, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-            painter.drawImage(0, 0, scaled)
+            key = (id(self.image), target.width(), target.height())
+            if self._scaled_key != key or self._scaled_cache is None:
+                self._scaled_cache = self.image.scaled(target, Qt.IgnoreAspectRatio,
+                                                       Qt.SmoothTransformation)
+                self._scaled_key = key
+            painter.drawImage(0, 0, self._scaled_cache)
             if self.show_grid:
                 pen = QPen(QColor(255, 255, 255, 190), 1, Qt.DashLine)
                 painter.setPen(pen)

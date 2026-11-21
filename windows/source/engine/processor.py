@@ -57,7 +57,12 @@ class IdPhotoProcessor:
                 cascade = cv2.CascadeClassifier(path)
                 if not cascade.empty():
                     self._cascades.append(cascade)
+        # v2.0.0 性能修复：matte 结果缓存改为有限 LRU（最多 4 项）。
+        # 抠图是全流程最贵的一步；拖动美颜/调色/换底等不改变裁剪的滑块时，
+        # 同一裁剪区域的 matte 可直接命中缓存，跳过 ONNX 推理，预览显著加快。
         self._cache = {}
+        self._cache_order = []
+        self._cache_max = 4
 
     # ---------- 人脸检测 / 变换 ----------
     def detect_largest_face(self, image: np.ndarray):
@@ -174,13 +179,19 @@ class IdPhotoProcessor:
     def obtain_matte(self, source, left, top, width, height, cropped):
         key = (id(source), left, top, width, height, cropped.shape[:2])
         if key in self._cache:
+            # 命中即提升到 LRU 末端
+            self._cache_order.remove(key)
+            self._cache_order.append(key)
             return self._cache[key]
         modnet = self.matting.matte(cropped)
         raw = self.fuse_alphas(modnet, cropped.shape[1], cropped.shape[0])
         pixels = cropped
         cleaned = self.cleanup_background(raw, pixels, cropped.shape[1], cropped.shape[0])
-        self._cache.clear()
         self._cache[key] = cleaned
+        self._cache_order.append(key)
+        while len(self._cache_order) > self._cache_max:
+            old = self._cache_order.pop(0)
+            self._cache.pop(old, None)
         return cleaned
 
     def fuse_alphas(self, modnet, width, height):
@@ -417,14 +428,33 @@ class IdPhotoProcessor:
         cr = 128.0 + 0.5 * r - 0.418688 * g - 0.081312 * b
         broad_skin = (cb >= 62) & (cb <= 142) & (cr >= 122) & (cr <= 192) & (yv > 24) & (yv < 250)
 
-        region = np.where(broad_skin, 1.0, 0.0).astype(np.float32)
-        if face is not None:
-            pad_x = max(6, int((face.width) * 0.18))
-            pad_y = max(6, int((face.height) * 0.28))
-            ys, xs = np.mgrid[0:h, 0:w]
-            in_face = ((xs >= face.left - pad_x) & (xs <= face.right + pad_x) &
-                       (ys >= face.top - pad_y) & (ys <= face.bottom + pad_y))
-            region = np.where(in_face, np.maximum(region, 0.55), region)
+        # v2.0.0 修复「浅白色方块」：旧版用整个人脸矩形(in_face)强制 region>=0.55，
+        # 人脸框 padding 延伸到右耳旁的蓝色背景时，背景像素被无差别提亮成白色硬边方块。
+        # 新方案：只对「肤色像素」作用，人脸框仅用作柔和的椭圆先验来放宽肤色权重，
+        # 且用平滑衰减而不是矩形硬覆盖；非肤色背景像素权重恒为 0，绝不会被提亮。
+        skin_weight = np.where(broad_skin, 1.0, 0.0).astype(np.float32)
+        if face is not None and face.width > 0 and face.height > 0:
+            ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+            cx = (face.left + face.right) * 0.5
+            cy = (face.top + face.bottom) * 0.5
+            # 椭圆先验：半轴略大于人脸，边缘 smoothstep 平滑衰减（无矩形硬边）
+            rx = max(1.0, face.width * 0.62)
+            ry = max(1.0, face.height * 0.72)
+            nx = (xs - cx) / rx
+            ny = (ys - cy) / ry
+            dist = np.sqrt(nx * nx + ny * ny)
+            t = np.clip((1.0 - dist) / 0.45, 0.0, 1.0)
+            face_soft = t * t * (3.0 - 2.0 * t)  # smoothstep，边缘平滑到 0
+            # 人脸椭圆内放宽肤色判定（容纳高光/阴影），但仅在椭圆内、且与柔和权重相乘
+            relaxed = (cb >= 55) & (cb <= 152) & (cr >= 112) & (cr <= 205) & (yv > 20) & (yv < 252)
+            prior = face_soft * np.where(relaxed, 0.5, 0.0).astype(np.float32)
+            skin_weight = np.maximum(skin_weight, prior)
+        # 再次与原始肤色约束取交集：背景（非肤色）权重强制归零，杜绝白块
+        region = skin_weight * np.where(broad_skin | ((skin_weight > 0) & (yv > 20)),
+                                        1.0, 0.0).astype(np.float32)
+        # 用盒滤波对权重做轻微羽化，消除任何残留硬边
+        region = _box_blur(region, w, h, max(2, min(w, h) // 220))
+        region = np.maximum(region, 0.0)
         mask = region > 0
         if not np.any(mask):
             return source
