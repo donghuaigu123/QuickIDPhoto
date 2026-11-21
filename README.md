@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**[下载 Android APK](https://github.com/donghuaigu123/QuickIDPhoto/releases/latest)** · **[下载 Windows 版](https://github.com/donghuaigu123/QuickIDPhoto/releases/tag/v2.0.0-windows)** · **[项目仓库](https://github.com/donghuaigu123/QuickIDPhoto)**
+**[下载 Android APK](https://github.com/donghuaigu123/QuickIDPhoto/releases/download/v2.0.0/QuickIDPhoto-v2.0.0.apk)** · **[下载 Windows 版](https://github.com/donghuaigu123/QuickIDPhoto/releases/tag/v2.0.0-windows)** · **[项目仓库](https://github.com/donghuaigu123/QuickIDPhoto)**
 
 一款以**隐私、本地处理和专业构图**为核心的开源 Android 证件照工具。支持相册单张编辑、带完整设置与预览的多照片批量处理，以及带参考图样式人形定位轮廓的相机拍摄。
 
