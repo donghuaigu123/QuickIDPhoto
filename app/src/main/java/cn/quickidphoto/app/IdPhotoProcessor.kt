@@ -965,36 +965,39 @@ object LayoutSheetGenerator {
         Triple("4R 相纸", 1200, 1800)
     )
 
-    fun sixInch(photo: Bitmap): Bitmap = generate(photo, 0, Color.WHITE)
+    fun sixInch(photo: Bitmap, widthMm: Float = 25f, heightMm: Float = 35f): Bitmap =
+        generate(photo, 0, Color.WHITE, widthMm, heightMm)
 
-    /** Arranges photos in a grid that maximizes the count for the sheet size. */
-    fun generate(photo: Bitmap, layoutIndex: Int, backgroundColor: Int): Bitmap {
+    /** 按标准物理尺寸排版：照片保持打印尺寸（mm×300DPI），不被缩小，能排几张排几张并居中。
+     *  旧算法遍历 1~12 行追求数量最大化，导致照片被无限缩小塞满相纸（六寸排出上百张小图）。
+     *  photoWidthMm/photoHeightMm 为证件照物理尺寸，按 300DPI 换算标准像素，与渲染分辨率无关。 */
+    fun generate(photo: Bitmap, layoutIndex: Int, backgroundColor: Int,
+                 photoWidthMm: Float, photoHeightMm: Float): Bitmap {
         val (name, sheetWidth, sheetHeight) = layouts[layoutIndex.coerceIn(0, layouts.lastIndex)]
         val sheet = Bitmap.createBitmap(sheetWidth, sheetHeight, Bitmap.Config.ARGB_8888)
         sheet.density = 300
         val canvas = Canvas(sheet)
         canvas.drawColor(backgroundColor)
-        val margin = 36
-        val gap = 18
-        val ratio = photo.width.toFloat() / photo.height
+        val margin = 24
+        val gap = 12
+        // 按物理尺寸换算标准像素（一寸 25×35mm -> 295×413px @300DPI）
+        var cellWidth = maxOf(1, (photoWidthMm / 25.4f * 300).roundToInt())
+        var cellHeight = maxOf(1, (photoHeightMm / 25.4f * 300).roundToInt())
 
-        var best: Triple<Int, Int, Int>? = null // cols, rows, cellHeight
-        for (rows in 1..12) {
-            val cellHeight = (sheetHeight - margin * 2 - gap * (rows - 1)) / rows
-            if (cellHeight <= 0) break
-            val cellWidth = (cellHeight * ratio).roundToInt()
-            if (cellWidth <= 0) continue
-            val cols = (sheetWidth - margin * 2 + gap) / (cellWidth + gap)
-            if (cols <= 0) continue
-            val count = cols * rows
-            val current = best
-            if (current == null || count > current.first * current.second) best = Triple(cols, rows, cellHeight)
+        var cols = maxOf(0, (sheetWidth - margin * 2 + gap) / (cellWidth + gap))
+        var rows = maxOf(0, (sheetHeight - margin * 2 + gap) / (cellHeight + gap))
+        // 极端情况（超大规格一张都放不下）时逐步等比缩小，直到至少能放一张
+        while ((cols <= 0 || rows <= 0) && cellHeight > 24) {
+            cellHeight = (cellHeight * 0.9).toInt()
+            cellWidth = (cellWidth * 0.9).toInt()
+            cols = maxOf(0, (sheetWidth - margin * 2 + gap) / (cellWidth + gap))
+            rows = maxOf(0, (sheetHeight - margin * 2 + gap) / (cellHeight + gap))
         }
-        val arrangement = best ?: Triple(1, 1, sheetHeight - margin * 2)
-        val cellHeight = arrangement.third
-        val cellWidth = (cellHeight * ratio).roundToInt()
-        val gridWidth = arrangement.first * cellWidth + (arrangement.first - 1) * gap
-        val gridHeight = arrangement.second * cellHeight + (arrangement.second - 1) * gap
+        cols = maxOf(1, cols)
+        rows = maxOf(1, rows)
+
+        val gridWidth = cols * cellWidth + (cols - 1) * gap
+        val gridHeight = rows * cellHeight + (rows - 1) * gap
         val offsetX = (sheetWidth - gridWidth) / 2
         val offsetY = (sheetHeight - gridHeight) / 2
 
@@ -1004,8 +1007,8 @@ object LayoutSheetGenerator {
             style = Paint.Style.STROKE
             pathEffect = DashPathEffect(floatArrayOf(10f, 8f), 0f)
         }
-        for (row in 0 until arrangement.second) {
-            for (column in 0 until arrangement.first) {
+        for (row in 0 until rows) {
+            for (column in 0 until cols) {
                 val x = offsetX + column * (cellWidth + gap)
                 val y = offsetY + row * (cellHeight + gap)
                 canvas.drawBitmap(photo, null, android.graphics.Rect(x, y, x + cellWidth, y + cellHeight), null)

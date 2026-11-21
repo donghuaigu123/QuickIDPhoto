@@ -717,7 +717,8 @@ class MainActivity : AppCompatActivity() {
                 val uri = withContext(Dispatchers.IO) {
                     val output = processor.render(source, spec, panelSettings.copyValues(), face)
                     val layout = LayoutSheetGenerator.layouts[panelSettings.printLayout.coerceIn(0, LayoutSheetGenerator.layouts.lastIndex)]
-                    val sheet = LayoutSheetGenerator.generate(output, panelSettings.printLayout, panelSettings.printBackgroundColor)
+                    val sheet = LayoutSheetGenerator.generate(output, panelSettings.printLayout, panelSettings.printBackgroundColor,
+                        spec.widthMm, spec.heightMm)
                     val sheetSpec = PhotoSpec("${layout.first}排版", layout.second * 25.4f / 300, layout.third * 25.4f / 300, layout.second, layout.third)
                     PhotoRepository.save(this@MainActivity, sheet, sheetSpec, panelSettings)
                 }

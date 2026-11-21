@@ -105,7 +105,8 @@ class PrintSheetWorker(QThread):
             photo = self.processor.render(self.source, self.spec, render_settings,
                                           self.face, preview=True)
             sheet = generate_layout(photo[:, :, :3], self.settings.print_layout,
-                                    self.settings.print_background_color)
+                                    self.settings.print_background_color,
+                                    photo_mm=(self.spec.width_mm, self.spec.height_mm))
             path = save_print_sheet(sheet, self.export_dir, self.spec, self.settings)
             if not self._cancelled:
                 self.done.emit(path)

@@ -2,17 +2,21 @@
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**[下载 Android APK](https://github.com/donghuaigu123/QuickIDPhoto/releases/download/v2.4.0/QuickIDPhoto-v2.4.0.apk)** · **[下载 Windows 版](https://github.com/donghuaigu123/QuickIDPhoto/releases/tag/v2.4.0-windows)** · **[项目仓库](https://github.com/donghuaigu123/QuickIDPhoto)**
+**[下载 Android APK](https://github.com/donghuaigu123/QuickIDPhoto/releases/download/v2.5.0/QuickIDPhoto-v2.5.0.apk)** · **[下载 Windows 版](https://github.com/donghuaigu123/QuickIDPhoto/releases/tag/v2.5.0-windows)** · **[项目仓库](https://github.com/donghuaigu123/QuickIDPhoto)**
 
 一款以**隐私、本地处理和专业构图**为核心的开源 Android 证件照工具。支持相册单张编辑、带完整设置与预览的多照片批量处理，以及带参考图样式人形定位轮廓的相机拍摄。
 
-## 🖥️ Windows 桌面版（v2.4.0）
+## 🖥️ Windows 桌面版（v2.5.0）
 
 同一算法的 Windows 桌面程序，**相册/批量编辑、抠图换底、美颜调色、高清输出、排版照**等功能与 Android v1.9.0 完全一致，并针对电脑使用习惯优化：三栏布局、目录导入缩略图可视化勾选、导出目录自由选择、滚轮缩放/拖拽平移、快捷键与拖拽导入、后台线程渲染不卡顿。绿色便携、无需安装、**Win7 SP1 x64 及以上可用**。**v2.0.0（两版同步）**：修复美颜精修后在耳朵/脸旁背景出现**浅白色方块**的问题（人脸矩形框无差别提亮背景所致，改为仅对肤色像素作用的平滑椭圆权重，背景不再被提亮）；Windows 版同时大幅优化性能（预览改轻量渲染、ONNX 限 2 线程、matte 结果缓存、取消堆叠渲染线程、缩放缓存），预览提速约 2 倍且不再卡顿。v1.9.3 修复含中文/空格路径启动失败；v1.9.2 内置 Universal CRT。
 
-- 下载：`[QuickIDPhoto-Windows-v2.4.0.zip](https://github.com/donghuaigu123/QuickIDPhoto/releases/download/v2.4.0-windows/QuickIDPhoto-Windows-v2.4.0.zip)`，解压后双击 `快捷证件照.exe`
+- 下载：`[QuickIDPhoto-Windows-v2.5.0.zip](https://github.com/donghuaigu123/QuickIDPhoto/releases/download/v2.5.0-windows/QuickIDPhoto-Windows-v2.5.0.zip)`，解压后双击 `快捷证件照.exe`
 - 源码与详细说明：[`windows/`](windows/README.md)
 
+
+## v2.5.0 更新（Android + Windows 同步）
+
+- **修复排版照照片过小、数量过多**：此前排版算法遍历 1~12 行「追求照片数量最大化」，把一寸照不断缩小以塞满相纸——六寸相纸上排出 200 多张微小照片（每张约 90px），完全无法使用。新版改为**按照片标准物理尺寸（mm×300DPI）排版**：照片保持标准打印尺寸不被缩小（一寸 295×413px），只计算相纸能容纳的行列数并居中留白。六寸一寸照现为 5 列×2 行共 10 张标准尺寸照片，带裁切虚线框，符合正常证件照排版。各规格各相纸均按物理尺寸自适应计算。
 
 ## v2.4.0 更新（Android + Windows 同步）
 

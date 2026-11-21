@@ -6,28 +6,38 @@ from PIL import Image, ImageDraw
 from .models import LAYOUTS
 
 
-def generate(photo: np.ndarray, layout_index: int = 0, background_color=(255, 255, 255)) -> np.ndarray:
+def generate(photo: np.ndarray, layout_index: int = 0, background_color=(255, 255, 255),
+             photo_mm=None) -> np.ndarray:
+    """按标准物理尺寸排版：照片保持打印尺寸（mm×300DPI），不被缩小，能排几张排几张并居中。
+
+    旧算法遍历 1~12 行追求数量最大化，导致照片被无限缩小塞满相纸（六寸排出上百张小图）。
+    新算法以照片标准尺寸为固定 cell，只计算相纸能容纳的行列数，剩余空间居中留白。
+
+    photo_mm: (宽mm, 高mm)。传入时按 300DPI 换算标准像素尺寸；不传则用照片自身像素尺寸。
+    """
     name, sheet_width, sheet_height = LAYOUTS[max(0, min(int(layout_index), len(LAYOUTS) - 1))]
     sheet = Image.new("RGB", (sheet_width, sheet_height), tuple(int(v) for v in background_color))
-    margin, gap = 36, 18
-    ratio = photo.shape[1] / float(photo.shape[0])
-    best = None
-    for rows in range(1, 13):
-        cell_height = (sheet_height - margin * 2 - gap * (rows - 1)) // rows
-        if cell_height <= 0:
-            break
-        cell_width = int(round(cell_height * ratio))
-        if cell_width <= 0:
-            continue
-        cols = (sheet_width - margin * 2 + gap) // (cell_width + gap)
-        if cols <= 0:
-            continue
-        if best is None or cols * rows > best[0] * best[1]:
-            best = (cols, rows, cell_height)
-    if best is None:
-        best = (1, 1, sheet_height - margin * 2)
-    cols, rows, cell_height = best
-    cell_width = int(round(cell_height * ratio))
+
+    dpi = 300
+    if photo_mm is not None:
+        # 按物理尺寸换算标准像素（一寸 25×35mm -> 295×413px @300DPI），与渲染输出分辨率无关
+        cell_width = max(1, int(round(float(photo_mm[0]) / 25.4 * dpi)))
+        cell_height = max(1, int(round(float(photo_mm[1]) / 25.4 * dpi)))
+    else:
+        cell_height = int(photo.shape[0])
+        cell_width = int(photo.shape[1])
+
+    margin, gap = 24, 12
+    cols = max(0, (sheet_width - margin * 2 + gap) // (cell_width + gap))
+    rows = max(0, (sheet_height - margin * 2 + gap) // (cell_height + gap))
+    # 极端情况（超大规格照片一张都放不下）时逐步等比缩小，直到至少能放一张
+    while (cols <= 0 or rows <= 0) and cell_height > 24:
+        cell_height = int(cell_height * 0.9)
+        cell_width = int(cell_width * 0.9)
+        cols = max(0, (sheet_width - margin * 2 + gap) // (cell_width + gap))
+        rows = max(0, (sheet_height - margin * 2 + gap) // (cell_height + gap))
+    cols, rows = max(1, cols), max(1, rows)
+
     grid_width = cols * cell_width + (cols - 1) * gap
     grid_height = rows * cell_height + (rows - 1) * gap
     offset_x = (sheet_width - grid_width) // 2
