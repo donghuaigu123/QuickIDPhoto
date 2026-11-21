@@ -696,18 +696,19 @@ class IdPhotoProcessor(context: android.content.Context) {
         val whitenAmount = settings.whiten / 100f * 0.55f * master
         val rosyAmount = settings.rosy / 100f * 0.45f * master
 
-        // v2.0.0 修复「浅白色方块」：旧版用整个人脸矩形(inFace)强制 region=0.55，
-        // 人脸框 padding 延伸到耳朵旁蓝色背景时背景被无差别提亮成白色硬边方块。
-        // 新方案：只对肤色像素作用；人脸框仅用作平滑椭圆先验放宽肤色判定，无矩形硬边，
-        // 非肤色背景像素权重恒为 0，杜绝白块。
+        // v2.1.0 修复「头发/衣服被一起美化」：v2.0.0 用放宽肤色使全图暖色像素都被美化。
+        // 正确逻辑 = 严格肤色判定 × 人脸椭圆（相乘而非并集）：
+        //   · 椭圆外（头发/衣服/背景）空间权重恒为 0，绝不被美化
+        //   · 椭圆内也须是严格肤色，排除黑发/染发/低饱和衣物
         val fl = face?.left?.toFloat() ?: -1f
         val ft = face?.top?.toFloat() ?: -1f
         val fr = face?.right?.toFloat() ?: -1f
         val fb = face?.bottom?.toFloat() ?: -1f
         val fcx = (fl + fr) * 0.5f
         val fcy = (ft + fb) * 0.5f
-        val frx = maxOf(1f, (fr - fl) * 0.62f)
-        val fry = maxOf(1f, (fb - ft) * 0.72f)
+        val frx = maxOf(1f, (fr - fl) * 0.44f)
+        val fry = maxOf(1f, (fb - ft) * 0.46f)
+        val hasFace = face != null && face.width > 0f && face.height > 0f
 
         for (y in 0 until result.height) {
             for (x in 0 until result.width) {
@@ -719,20 +720,19 @@ class IdPhotoProcessor(context: android.content.Context) {
                 val yv = 0.299f * r + 0.587f * g + 0.114f * b
                 val cb = 128f - 0.168736f * r - 0.331264f * g + 0.5f * b
                 val cr = 128f + 0.5f * r - 0.418688f * g - 0.081312f * b
-                // 放宽肤色判定：YCbCr 常人像区间 + 亮度约束
-                val broadSkin = cb in 62f..142f && cr in 122f..192f && yv > 24f && yv < 250f
-                var regionWeight = if (broadSkin) 1f else 0f
-                // 人脸椭圆内平滑放宽肤色判定（容纳高光/阴影），smoothstep 边缘衰减，无硬边
-                if (face != null && regionWeight == 0f) {
+                // 严格肤色判定（收敛区间，排除头发/衣物暖色干扰）
+                val strictSkin = cb in 85f..135f && cr in 135f..180f && yv > 55f && yv < 245f &&
+                        r > g + 2 && r > b + 6
+                if (!strictSkin) continue
+                var regionWeight = 1f
+                // 人脸椭圆相乘：椭圆外恒为 0（头发/衣服/脖颈/背景不受影响）
+                if (hasFace) {
                     val nx = (x - fcx) / frx
                     val ny = (y - fcy) / fry
                     val dist = kotlin.math.sqrt(nx * nx + ny * ny)
-                    if (dist < 1f) {
-                        val t = ((1f - dist) / 0.45f).coerceIn(0f, 1f)
-                        val faceSoft = t * t * (3f - 2f * t)
-                        val relaxed = cb in 55f..152f && cr in 112f..205f && yv > 20f && yv < 252f
-                        if (relaxed) regionWeight = faceSoft * 0.5f
-                    }
+                    if (dist >= 1f) continue
+                    val t = ((1f - dist) / 0.22f).coerceIn(0f, 1f)
+                    regionWeight = t * t * (3f - 2f * t)
                 }
                 if (regionWeight <= 0f) continue
                 var nr = r.toFloat()
