@@ -18,7 +18,7 @@ from .widgets import SliderRow, ChipGroup, DirectoryRow, PreviewPane
 from .pickers import FolderPhotoPicker
 from .workers import RenderWorker, BatchWorker, PrintSheetWorker, SaveCurrentWorker
 
-VERSION = "v1.9.1"
+VERSION = "v1.9.2"
 
 
 class MainWindow(QMainWindow):
