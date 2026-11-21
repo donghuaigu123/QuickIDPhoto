@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """可复用控件：滑块行、色块组、目录选择行、带棋盘背景的预览窗格。"""
+import os
 import numpy as np
 from PyQt5.QtCore import Qt, pyqtSignal, QSize, QPoint
 from PyQt5.QtGui import QImage, QPainter, QColor, QBrush, QWheelEvent, QPen
@@ -115,7 +116,8 @@ class DirectoryRow(QWidget):
         layout.addWidget(btn)
 
     def browse(self):
-        path = QFileDialog.getExistingDirectory(self, "选择导出目录", self.edit.text() or None)
+        start = self.edit.text() if self.edit.text() and os.path.isdir(self.edit.text()) else ""
+        path = QFileDialog.getExistingDirectory(self, "选择导出目录", start)
         if path:
             self.edit.setText(path)
 
@@ -151,15 +153,19 @@ class PreviewCanvas(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#E8EDF5"))
-        # 棋盘格表示透明区域
+        # 只绘制可见区域（event.rect()），避免高倍缩放时遍历整块超大画布造成卡顿
+        visible = event.rect().intersected(self.rect())
+        painter.fillRect(visible, QColor("#E8EDF5"))
         tile = 16
         light = QColor("#FFFFFF")
         dark = QColor("#D9E0EC")
-        for y in range(0, self.height(), tile):
-            for x in range(0, self.width(), tile):
+        y0 = (visible.top() // tile) * tile
+        x0 = (visible.left() // tile) * tile
+        for y in range(y0, visible.bottom() + 1, tile):
+            for x in range(x0, visible.right() + 1, tile):
                 color = light if ((x // tile + y // tile) % 2 == 0) else dark
-                painter.fillRect(x, y, min(tile, self.width() - x), min(tile, self.height() - y), color)
+                painter.fillRect(x, y, min(tile, visible.right() + 1 - x),
+                                 min(tile, visible.bottom() + 1 - y), color)
         if self.image is not None and not self.image.isNull():
             target = QSize(max(1, int(self.image.width() * self.scale)),
                            max(1, int(self.image.height() * self.scale)))
