@@ -721,9 +721,14 @@ class IdPhotoProcessor(context: android.content.Context) {
         mor = dilate(mor, sw, sh, ko)
 
         // 3) 羽化（可分离盒滤波近似高斯，两次盒滤波）
+        // 关键修复：mor / blur 是 0..255 的二值强度图，boxBlur 输出仍在 0..255。
+        // v2.3.0 漏了归一化，把 0..255 当 0..1 权重传给 applyBeauty，
+        // 导致 wa=whitenAmount*region 被放大 255 倍 → 溢出成纯白块/彩色噪点。
+        // 这里统一归一化到 0..1，并 clamp 兜底。
         val radius = max(1, (sw / 90f).roundToInt())
         var blur = boxBlur(mor, sw, sh, radius)
         blur = boxBlur(blur, sw, sh, radius)
+        for (i in blur.indices) blur[i] = (blur[i] / 255f).coerceIn(0f, 1f)
 
         // 4) 放大回原分辨率（双线性）
         val full = FloatArray(w * h)
@@ -741,7 +746,7 @@ class IdPhotoProcessor(context: android.content.Context) {
                 val v01 = blur[y1i * sw + x0i]; val v11 = blur[y1i * sw + x1i]
                 val top = v00 + (v10 - v00) * fx
                 val bot = v01 + (v11 - v01) * fx
-                full[y * w + x] = (top + (bot - top) * fy)
+                full[y * w + x] = (top + (bot - top) * fy).coerceIn(0f, 1f)
             }
         }
         return full

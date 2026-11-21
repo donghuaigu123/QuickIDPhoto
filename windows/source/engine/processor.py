@@ -28,7 +28,7 @@ def _lantern_resample(image: np.ndarray, width: int, height: int) -> np.ndarray:
 
 
 def _auto_face_mask(rgb: np.ndarray, face) -> np.ndarray:
-    """v2.3.0 自动面部范围提取：不再用固定椭圆，而是根据照片内容自动分割真实脸型。
+    """v2.4.0 自动面部范围提取：不再用固定椭圆，而是根据照片内容自动分割真实脸型。
 
     算法（降采样执行，速度快，两版通用）：
       1. 在人脸检测框内做肤色分割（YCbCr + RGB 约束，覆盖黄种人肤色、排除黑发/背景）；
@@ -529,10 +529,13 @@ class IdPhotoProcessor:
 
         r, g, b = original[:, :, 0], original[:, :, 1], original[:, :, 2]
 
-        # v2.3.0 自动面部范围提取：不再使用固定椭圆（对不同脸型/角度不通用），
+        # v2.4.0 自动面部范围提取：不再使用固定椭圆（对不同脸型/角度不通用），
         # 改为根据照片内容自动分割真实脸型：人脸框内肤色分割 + 形态学填洞去噪 + 羽化。
         # 得到贴合实际脸部轮廓的不规则 mask；头发/衣服/背景权重恒为 0。
         region = _auto_face_mask(rgb, face)
+        # v2.4.0 防御性归一化：确保 mask 严格在 0~1。_auto_face_mask 内部已归一化，
+        # 此处二次 clamp 兜底，杜绝任何值域异常被放大成白块/噪点（Android 版曾因漏归一化出此 bug）。
+        region = np.clip(region, 0.0, 1.0).astype(np.float32)
         mask = region > 0
         if not np.any(mask):
             return source

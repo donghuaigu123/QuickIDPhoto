@@ -137,8 +137,13 @@ def save_image(array: np.ndarray, directory: str, spec, settings,
         else:
             image = Image.fromarray(arr, "RGB").convert("RGBA")
     else:
-        image = Image.fromarray(arr, "RGB") if (arr.ndim == 3 and arr.shape[2] >= 3) \
-            else Image.fromarray(arr, "L").convert("RGB")
+        # 关键修复：render 输出常为 4 通道 RGBA。旧写法 Image.fromarray(arr,"RGB")
+        # 依赖 Pillow 隐式丢弃 alpha 通道，在部分 Pillow 版本会抛
+        # "Cannot handle this data type" 导致导出失败。这里显式取前 3 通道，稳健兼容。
+        if arr.ndim == 3 and arr.shape[2] >= 3:
+            image = Image.fromarray(np.ascontiguousarray(arr[:, :, :3]), "RGB")
+        else:
+            image = Image.fromarray(arr, "L").convert("RGB")
     dpi = max(1, int(spec.dpi)) * (1 if prefix == "print" else max(1, min(3, int(settings.output_scale))))
     if png:
         stream = io.BytesIO()
