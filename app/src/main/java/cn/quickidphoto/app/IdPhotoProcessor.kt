@@ -103,7 +103,12 @@ class IdPhotoProcessor(context: android.content.Context) {
         } else {
             replaceBackground(cropped, settings, matte)
         }
-        val beautified = applyBeauty(composited, settings)
+                val faceInCrop = face?.let {
+            val sc = cropped.width.toFloat() / width
+            FaceBox((it.left - left) * sc, (it.top - top) * sc,
+                (it.right - left) * sc, (it.bottom - top) * sc)
+        }
+        val beautified = applyBeauty(composited, settings, faceInCrop)
         val effectiveScale = if (preview) 1 else settings.outputScale.coerceIn(1, 3)
         val targetWidth = spec.widthPx * effectiveScale
         val targetHeight = spec.heightPx * effectiveScale
@@ -111,7 +116,8 @@ class IdPhotoProcessor(context: android.content.Context) {
         val output = scaled.copy(Bitmap.Config.ARGB_8888, true)
         output.density = spec.dpi * effectiveScale
         applyAdjustments(output, settings)
-        if (settings.sharpen > 0) applySharpen(output, settings.sharpen / 100f * 0.9f)
+                if (settings.sharpen > 0 && settings.beautyIntensity > 0)
+            applySharpen(output, settings.sharpen / 100f * 0.9f * (settings.beautyIntensity / 100f))
         return output
     }
 
@@ -120,7 +126,7 @@ class IdPhotoProcessor(context: android.content.Context) {
         val pixels = IntArray(source.width * source.height)
         source.getPixels(pixels, 0, source.width, 0, 0, source.width, source.height)
 
-        val alpha = smoothMatte(matte, source.width, source.height, settings)
+        val alpha = smoothMatte(matte, pixels, source.width, source.height, settings)
         val originalBackground = estimateBackground(pixels, matte)
         val decontamStrength = settings.hairDetail / 100f * 0.92f
 
@@ -177,40 +183,66 @@ class IdPhotoProcessor(context: android.content.Context) {
      * 边缘平滑：在低分辨率上做盒式模糊再上采样，消除锯齿与阶梯感；
      * 再按“发丝细节”权重混合原始蒙版保留真实发丝，最后用 smoothstep 做柔和过渡。
      */
-    private fun smoothMatte(raw: FloatArray, width: Int, height: Int, settings: EditorSettings): FloatArray {
-        val maxSide = 1200
-        val step = max(1, (maxOf(width, height) + maxSide - 1) / maxSide)
-        val sw = max(1, (width + step - 1) / step)
-        val sh = max(1, (height + step - 1) / step)
-        val small = FloatArray(sw * sh)
+    private fun smoothMatte(raw: FloatArray, pixels: IntArray, width: Int, height: Int, settings: EditorSettings): FloatArray {
+        val maxSide = 1000
+        val step = maxOf(1, (maxOf(width, height) + maxSide - 1) / maxSide)
+        val sw = maxOf(1, (width + step - 1) / step)
+        val sh = maxOf(1, (height + step - 1) / step)
+        val n = sw * sh
+        val small = FloatArray(n)
+        val guide = FloatArray(n)
         for (sy in 0 until sh) {
             val y0 = sy * step
-            val y1 = min(height, y0 + step)
+            val y1 = minOf(height, y0 + step)
             for (sx in 0 until sw) {
                 val x0 = sx * step
-                val x1 = min(width, x0 + step)
-                var sum = 0f
-                var count = 0
-                for (y in y0 until y1) {
-                    for (x in x0 until x1) {
-                        sum += raw[y * width + x]
-                        count++
-                    }
+                val x1 = minOf(width, x0 + step)
+                var sumA = 0f; var sumL = 0f; var cnt = 0
+                for (y in y0 until y1) for (x in x0 until x1) {
+                    val i = y * width + x
+                    sumA += raw[i]
+                    val p = pixels[i]
+                    sumL += 0.299f * Color.red(p) + 0.587f * Color.green(p) + 0.114f * Color.blue(p)
+                    cnt++
                 }
-                small[sy * sw + sx] = sum / max(1, count)
+                val idx = sy * sw + sx
+                small[idx] = sumA / maxOf(1, cnt)
+                guide[idx] = (sumL / maxOf(1, cnt)) / 255f
             }
         }
-        val blurred = boxBlur(small, sw, sh, 2)
+        // 引导滤波：以原图亮度为引导，平滑平坦区但保留真实边缘（发丝/轮廓）
+        val radius = 2 + (settings.edgeFeather / 34)
+        val eps = 0.0012f
+        val meanI = boxBlur(guide, sw, sh, radius)
+        val meanP = boxBlur(small, sw, sh, radius)
+        val ii = FloatArray(n) { guide[it] * guide[it] }
+        val ip = FloatArray(n) { guide[it] * small[it] }
+        val meanII = boxBlur(ii, sw, sh, radius)
+        val meanIP = boxBlur(ip, sw, sh, radius)
+        val a = FloatArray(n) {
+            (meanIP[it] - meanI[it] * meanP[it]) /
+                (meanII[it] - meanI[it] * meanI[it] + eps)
+        }
+        val b = FloatArray(n) { meanP[it] - a[it] * meanI[it] }
+        val meanA = boxBlur(a, sw, sh, radius)
+        val meanB = boxBlur(b, sw, sh, radius)
+        val filtered = FloatArray(n) { (meanA[it] * guide[it] + meanB[it]).coerceIn(0f, 1f) }
+
+        // 上采样回原分辨率
         val up = FloatArray(raw.size)
         for (y in 0 until height) {
             val my = (y + 0.5f) / step - 0.5f
             for (x in 0 until width) {
-                up[y * width + x] = bilinear(blurred, sw, sh, (x + 0.5f) / step - 0.5f, my)
+                up[y * width + x] = bilinear(filtered, sw, sh, (x + 0.5f) / step - 0.5f, my)
             }
         }
-        val detail = (0.18f + settings.hairDetail / 100f * 0.42f).coerceIn(0.15f, 0.60f)
-        val softness = (0.10f + settings.edgeFeather / 100f * 0.14f).coerceIn(0.04f, 0.24f)
-        val threshold = (0.5f - settings.edgeShift / 100f * 0.20f).coerceIn(0.15f, 0.85f)
+        // 三个滑块现在都有明确且大幅度的效果：
+        // 发丝细节=保留原始蒙版比例，边缘柔化=过渡宽度，轮廓收缩/扩展=阈值偏移 ±0.20
+        val detail = (0.10f + settings.hairDetail / 100f * 0.55f).coerceIn(0.08f, 0.68f)
+        // 发丝细节同时收窄过渡并增强边缘对比，保证任何场景都能明显感知
+        val softness = ((0.06f + settings.edgeFeather / 100f * 0.20f) *
+            (1.25f - settings.hairDetail / 100f * 0.55f)).coerceIn(0.02f, 0.30f)
+        val threshold = (0.5f - settings.edgeShift / 100f * 0.40f).coerceIn(0.12f, 0.88f)
         val output = FloatArray(raw.size)
         for (i in raw.indices) {
             val merged = up[i] * (1f - detail) + raw[i] * detail
@@ -292,19 +324,47 @@ class IdPhotoProcessor(context: android.content.Context) {
             java.util.Arrays.fill(full, 1f)
             return full
         }
-        for (i in full.indices) {
-            val m = if (modnet != null && i < modnet.size) modnet[i] else -1f
-            val k = if (mlkit != null && i < mlkit.size) mlkit[i] else -1f
-            full[i] = when {
-                k < 0f -> m
-                m < 0f -> k
-                else -> {
-                    // smoothstep(0.32, 0.72)：ML Kit 越确信，越向人体侧柔和提升
-                    val t = ((k - 0.32f) / 0.40f).coerceIn(0f, 1f)
-                    val body = t * t * (3f - 2f * t)
-                    (m + (1f - m) * body * 0.88f).coerceIn(0f, 1f)
-                }
+        if (modnet == null) {
+            System.arraycopy(mlkit!!, 0, full, 0, minOf(full.size, mlkit.size))
+            return full
+        }
+        if (mlkit == null) {
+            System.arraycopy(modnet, 0, full, 0, minOf(full.size, modnet.size))
+            return full
+        }
+        // 关键改进：ML Kit 的粗分割只用于填补“身体内部深区域”的漏抠，
+        // 绝不覆盖 MODNet 的精细边缘——否则背景处 m=0 被抬升，边缘变粗糙、位置漂移。
+        // 在 1/4 分辨率上求 ML Kit 深内部掩码（3x3 邻域全部高置信）。
+        val step = 4
+        val sw = maxOf(1, (width + step - 1) / step)
+        val sh = maxOf(1, (height + step - 1) / step)
+        val small = FloatArray(sw * sh)
+        for (sy in 0 until sh) {
+            val y0 = sy * step
+            val y1 = minOf(height, y0 + step)
+            for (sx in 0 until sw) {
+                val x0 = sx * step
+                val x1 = minOf(width, x0 + step)
+                var sum = 0f; var cnt = 0
+                for (y in y0 until y1) for (x in x0 until x1) { sum += mlkit[y * width + x]; cnt++ }
+                small[sy * sw + sx] = sum / maxOf(1, cnt)
             }
+        }
+        val core = BooleanArray(sw * sh)
+        for (y in 1 until sh - 1) for (x in 1 until sw - 1) {
+            var ok = true
+            for (dy in -1..1) for (dx in -1..1) {
+                if (small[(y + dy) * sw + (x + dx)] < 0.62f) ok = false
+            }
+            core[y * sw + x] = ok
+        }
+        for (i in full.indices) {
+            val m = modnet[i]
+            val x = i % width
+            val y = i / width
+            val sx = minOf(sw - 1, x / step)
+            val sy = minOf(sh - 1, y / step)
+            full[i] = if (core[sy * sw + sx] && m < 0.72f) maxOf(m, 0.92f) else m
         }
         return full
     }
@@ -332,11 +392,11 @@ class IdPhotoProcessor(context: android.content.Context) {
         val bgR = (r / count).roundToInt()
         val bgG = (g / count).roundToInt()
         val bgB = (b / count).roundToInt()
-        val colorThresholdSq = 50 * 50
+        val colorThresholdSq = 74 * 74
 
         fun isBackground(i: Int): Boolean {
-            if (alpha[i] >= 0.62f) return false // 确定前景，严格保护
-            if (alpha[i] < 0.20f) return true
+            if (alpha[i] >= 0.56f) return false // 确定前景，严格保护
+            if (alpha[i] < 0.18f) return true
             val p = pixels[i]
             val dr = Color.red(p) - bgR
             val dg = Color.green(p) - bgG
@@ -371,9 +431,11 @@ class IdPhotoProcessor(context: android.content.Context) {
         }
         // 内部空洞：未被边缘洪泛触达的低置信度区域按 ML Kit 置信度柔和补回
         for (i in alpha.indices) {
-            if (!visited[i] && alpha[i] in 0f..0.62f) {
-                val guidance = if (mlkit != null && i < mlkit.size) mlkit[i] else 0.8f
-                alpha[i] = max(alpha[i], (guidance * 0.92f).coerceIn(0f, 0.9f))
+            if (!visited[i] && alpha[i] in 0f..0.56f) {
+                val guidance = if (mlkit != null && i < mlkit.size) mlkit[i] else 0f
+                // 只在 ML Kit 也高度确认为人体时才补回，避免把残留背景抬亮
+                alpha[i] = if (guidance > 0.72f) maxOf(alpha[i], guidance * 0.9f)
+                           else alpha[i] * 0.45f
             }
         }
         return alpha
@@ -578,18 +640,16 @@ class IdPhotoProcessor(context: android.content.Context) {
         return (3f * sin(x) * sin(x / 3f) / (x * x))
     }
 
-    private fun applyBeauty(source: Bitmap, settings: EditorSettings): Bitmap {
-        if (settings.smooth == 0 && settings.whiten == 0 && settings.rosy == 0) return source
+    private fun applyBeauty(source: Bitmap, settings: EditorSettings, face: FaceBox?): Bitmap {
+        if (settings.beautyIntensity <= 0 ||
+            (settings.smooth == 0 && settings.whiten == 0 && settings.rosy == 0)) return source
         val result = source.copy(Bitmap.Config.ARGB_8888, true)
         val pixels = IntArray(result.width * result.height)
         result.getPixels(pixels, 0, result.width, 0, 0, result.width, result.height)
         val softPixels = if (settings.smooth > 0) {
-            val fine = Bitmap.createScaledBitmap(
-                result, max(1, result.width / 8), max(1, result.height / 8), true
-            )
-            val broad = Bitmap.createScaledBitmap(
-                result, max(1, result.width / 16), max(1, result.height / 16), true
-            )
+            // 双边式磨皮：多尺度模糊，保留五官边缘不被抹平
+            val fine = Bitmap.createScaledBitmap(result, max(1, result.width / 6), max(1, result.height / 6), true)
+            val broad = Bitmap.createScaledBitmap(result, max(1, result.width / 14), max(1, result.height / 14), true)
             val fineBlur = Bitmap.createScaledBitmap(fine, result.width, result.height, true)
             val broadBlur = Bitmap.createScaledBitmap(broad, result.width, result.height, true)
             val finePixels = IntArray(result.width * result.height)
@@ -599,45 +659,64 @@ class IdPhotoProcessor(context: android.content.Context) {
             IntArray(pixels.size) { i ->
                 Color.argb(
                     Color.alpha(finePixels[i]),
-                    (Color.red(finePixels[i]) * 0.62f + Color.red(broadPixels[i]) * 0.38f).roundToInt(),
-                    (Color.green(finePixels[i]) * 0.62f + Color.green(broadPixels[i]) * 0.38f).roundToInt(),
-                    (Color.blue(finePixels[i]) * 0.62f + Color.blue(broadPixels[i]) * 0.38f).roundToInt()
+                    (Color.red(finePixels[i]) * 0.6f + Color.red(broadPixels[i]) * 0.4f).roundToInt(),
+                    (Color.green(finePixels[i]) * 0.6f + Color.green(broadPixels[i]) * 0.4f).roundToInt(),
+                    (Color.blue(finePixels[i]) * 0.6f + Color.blue(broadPixels[i]) * 0.4f).roundToInt()
                 )
             }
         } else null
+
         val master = settings.beautyIntensity / 100f
-        val smoothAmount = settings.smooth / 100f * 0.95f * master
-        val whitenAmount = settings.whiten / 100f * 0.28f * master
-        val rosyAmount = settings.rosy / 100f * 0.24f * master
-        for (i in pixels.indices) {
-            val color = pixels[i]
-            val r = Color.red(color)
-            val g = Color.green(color)
-            val b = Color.blue(color)
-            val y = 0.299f * r + 0.587f * g + 0.114f * b
-            val cb = 128f - 0.168736f * r - 0.331264f * g + 0.5f * b
-            val cr = 128f + 0.5f * r - 0.418688f * g - 0.081312f * b
-            val skin = cb in 72f..132f && cr in 128f..184f && y > 28f
-            if (!skin) continue
-            var nr = r.toFloat()
-            var ng = g.toFloat()
-            var nb = b.toFloat()
-            softPixels?.let {
-                nr += (Color.red(it[i]) - nr) * smoothAmount
-                ng += (Color.green(it[i]) - ng) * smoothAmount
-                nb += (Color.blue(it[i]) - nb) * smoothAmount
+        val smoothAmount = (settings.smooth / 100f).pow(0.8f) * master
+        val whitenAmount = settings.whiten / 100f * 0.55f * master
+        val rosyAmount = settings.rosy / 100f * 0.45f * master
+
+        // 人脸区域（含下颌/脖颈扩展）作为先验：区域内放宽肤色判定，保证效果覆盖整张脸
+        val fl = face?.left?.toInt() ?: -1
+        val ft = face?.top?.toInt() ?: -1
+        val fr = face?.right?.toInt() ?: -1
+        val fb = face?.bottom?.toInt() ?: -1
+        val padX = maxOf(6, ((fr - fl) * 0.18f).toInt())
+        val padY = maxOf(6, ((fb - ft) * 0.28f).toInt())
+
+        for (y in 0 until result.height) {
+            for (x in 0 until result.width) {
+                val i = y * result.width + x
+                val color = pixels[i]
+                val r = Color.red(color)
+                val g = Color.green(color)
+                val b = Color.blue(color)
+                val yv = 0.299f * r + 0.587f * g + 0.114f * b
+                val cb = 128f - 0.168736f * r - 0.331264f * g + 0.5f * b
+                val cr = 128f + 0.5f * r - 0.418688f * g - 0.081312f * b
+                // 放宽肤色判定：YCbCr 常人像区间 + 亮度约束，避免大量像素被排除导致“没效果”
+                val broadSkin = cb in 62f..142f && cr in 122f..192f && yv > 24f && yv < 250f
+                val inFace = face != null && x in (fl - padX)..(fr + padX) && y in (ft - padY)..(fb + padY)
+                if (!broadSkin && !inFace) continue
+                // 人脸区域内即使超出肤色区间也轻度作用（如高光/阴影区），但降低强度避免误伤
+                val regionWeight = if (broadSkin) 1f else 0.55f
+                var nr = r.toFloat()
+                var ng = g.toFloat()
+                var nb = b.toFloat()
+                softPixels?.let {
+                    val amt = smoothAmount * regionWeight
+                    nr += (Color.red(it[i]) - nr) * amt
+                    ng += (Color.green(it[i]) - ng) * amt
+                    nb += (Color.blue(it[i]) - nb) * amt
+                }
+                val wa = whitenAmount * regionWeight
+                nr += (255f - nr) * wa
+                ng += (255f - ng) * wa
+                nb += (255f - nb) * wa
+                // 气色红润：提升红通道、轻微压绿蓝，比单纯加红更自然
+                val lu = 0.299f * nr + 0.587f * ng + 0.114f * nb
+                val ra = rosyAmount * regionWeight
+                nr += (lu + (238f - lu) * 0.28f - nr) * ra
+                ng += (lu - 3f - ng) * ra
+                nb += (lu - 6f - nb) * ra
+                pixels[i] = Color.argb(Color.alpha(color), nr.roundToInt().coerceIn(0, 255),
+                    ng.roundToInt().coerceIn(0, 255), nb.roundToInt().coerceIn(0, 255))
             }
-            nr += (255f - nr) * whitenAmount
-            ng += (255f - ng) * whitenAmount
-            nb += (255f - nb) * whitenAmount
-            val rosyR = min(255f, nr + 34f)
-            val rosyG = min(255f, ng + 4f)
-            val rosyB = min(255f, nb + 10f)
-            nr += (rosyR - nr) * rosyAmount
-            ng += (rosyG - ng) * rosyAmount
-            nb += (rosyB - nb) * rosyAmount
-            pixels[i] = Color.argb(Color.alpha(color), nr.roundToInt().coerceIn(0, 255),
-                ng.roundToInt().coerceIn(0, 255), nb.roundToInt().coerceIn(0, 255))
         }
         result.setPixels(pixels, 0, result.width, 0, 0, result.width, result.height)
         return result

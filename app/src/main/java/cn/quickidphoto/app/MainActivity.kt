@@ -574,6 +574,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun applyBeautyPreset(smooth: Int, whiten: Int, rosy: Int, sharpen: Int) {
         panelSettings.smooth = smooth; panelSettings.whiten = whiten; panelSettings.rosy = rosy; panelSettings.sharpen = sharpen
+        // 预设必须恢复总强度，否则用户曾把总强度调到 0 时所有预设看起来都“没效果”
+        panelSettings.beautyIntensity = 100
         showEditorTab(2); refreshPreview()
     }
 

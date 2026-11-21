@@ -74,14 +74,29 @@ class ModnetMatting(context: Context) {
             val offsetY = (size - nh) / 2
             val srcPixels = IntArray(sw * sh)
             source.getPixels(srcPixels, 0, sw, 0, 0, sw, sh)
-            // 用边缘像素复制填充模型输入，避免拉伸导致的人形变形和边缘错位
-            val pixels = IntArray(size * size)
+            // 用四角采样得到的背景色填充 letterbox 空白区（而非边缘复制）。
+            // 边缘复制会把人像轮廓延伸到填充区、误导模型把填充区判为前景，
+            // 是“背景扣不干净 / 位置不准”的诱因之一。
+            var br = 0f; var bg = 0f; var bb = 0f; var bc = 0
+            val cs = maxOf(1, minOf(sw, sh) / 12)
+            fun corner(cx: Int, cy: Int) {
+                for (dy in 0 until cs) for (dx in 0 until cs) {
+                    val px = srcPixels[(cy + dy) * sw + (cx + dx)]
+                    br += Color.red(px); bg += Color.green(px); bb += Color.blue(px); bc++
+                }
+            }
+            corner(0, 0); corner(sw - cs, 0); corner(0, sh - cs); corner(sw - cs, sh - cs)
+            val bgColor = if (bc > 0) Color.rgb((br / bc).roundToInt(), (bg / bc).roundToInt(), (bb / bc).roundToInt())
+                          else Color.WHITE
+            val pixels = IntArray(size * size) { bgColor }
             for (y in 0 until size) {
-                val sy = ((y - offsetY).toFloat() / scale).roundToInt().coerceIn(0, sh - 1)
+                val sy = ((y - offsetY).toFloat() / scale).roundToInt()
+                if (sy !in 0 until sh) continue
                 val row = y * size
                 val srcRow = sy * sw
                 for (x in 0 until size) {
-                    val sx = ((x - offsetX).toFloat() / scale).roundToInt().coerceIn(0, sw - 1)
+                    val sx = ((x - offsetX).toFloat() / scale).roundToInt()
+                    if (sx !in 0 until sw) continue
                     pixels[row + x] = srcPixels[srcRow + sx]
                 }
             }
