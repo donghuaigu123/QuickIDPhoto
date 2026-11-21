@@ -116,8 +116,10 @@ class IdPhotoProcessor(context: android.content.Context) {
         val output = scaled.copy(Bitmap.Config.ARGB_8888, true)
         output.density = spec.dpi * effectiveScale
         applyAdjustments(output, settings)
-                if (settings.sharpen > 0 && settings.beautyIntensity > 0)
-            applySharpen(output, settings.sharpen / 100f * 0.9f * (settings.beautyIntensity / 100f))
+        // 细节锐化属于清晰度调整，必须独立于"美颜总强度"：
+        // 此前总强度调低或归零时锐化会被一并削弱/归零，导致"锐化滑块不起作用"。
+        if (settings.sharpen > 0)
+            applySharpen(output, settings.sharpen / 100f * 0.9f)
         return output
     }
 

@@ -421,7 +421,7 @@ class MainActivity : AppCompatActivity() {
         val row = horizontal(this)
         row.addView(action("自动白平衡") { autoWhiteBalance() }, LinearLayout.LayoutParams(0, dp(48), 1f))
         row.addView(action("自然增强") {
-            panelSettings.brightness = 6; panelSettings.contrast = 8; panelSettings.saturation = 4
+            panelSettings.brightness = 8; panelSettings.contrast = 14; panelSettings.saturation = 10
             showEditorTab(3); refreshPreview()
         }, LinearLayout.LayoutParams(0, dp(48), 1f))
         row.addView(action("全部归零") {
@@ -460,8 +460,14 @@ class MainActivity : AppCompatActivity() {
             if (panelBatchMode) startBatchSave() else savePhoto()
         }, LinearLayout.LayoutParams(0, dp(48), 1.4f))
         panel.addView(format)
-        slider(panel, "JPG 质量", 60, 100, panelSettings.jpegQuality, "") { panelSettings.jpegQuality = it }
-        slider(panel, "文件大小上限", 0, 1024, panelSettings.targetKb, " KB") { panelSettings.targetKb = it }
+        slider(panel, "JPG 质量", 60, 100, panelSettings.jpegQuality, "") {
+            panelSettings.jpegQuality = it
+            previewStatus?.text = "JPG 质量 $it% · 保存时生效，不影响预览清晰度"
+        }
+        slider(panel, "文件大小上限", 0, 1024, panelSettings.targetKb, " KB") {
+            panelSettings.targetKb = it
+            previewStatus?.text = if (it == 0) "文件大小不限制" else "保存时将自动压缩至 ${it} KB 以内"
+        }
         panel.addView(label("大小上限仅对 JPG 生效；设为 0 表示不限制。报名系统要求 20–200KB 时可直接设置。", 12f, Muted))
         panel.addView(sectionTitle("排版照（300DPI 含裁切线）"))
         val layoutRow = HorizontalScrollView(this)
@@ -683,13 +689,17 @@ class MainActivity : AppCompatActivity() {
                 val result = withContext(Dispatchers.IO) {
                     val output = processor.render(source, spec, panelSettings.copyValues(), face)
                     val uri = PhotoRepository.save(this@MainActivity, output, spec, panelSettings)
-                    output to uri
+                    val sizeKb = try {
+                        (contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: 0L) / 1024L
+                    } catch (_: Throwable) { 0L }
+                    Triple(output, uri, sizeKb)
                 }
                 rendered = result.first
                 preview?.bitmap = result.first
                 lastSaved = result.second
+                val sizeText = if (result.third > 0) " · ${result.third} KB" else ""
                 this@MainActivity.threeDDialog().setTitle("已保存到相册")
-                    .setMessage("Pictures/快捷证件照\n${spec.widthPx}×${spec.heightPx}px")
+                    .setMessage("Pictures/快捷证件照\n${spec.widthPx}×${spec.heightPx}px$sizeText")
                     .setPositiveButton("完成", null)
                     .setNeutralButton("分享") { _, _ -> shareLastSaved() }.show()
             } catch (error: Throwable) {
