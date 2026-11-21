@@ -2,9 +2,17 @@
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**[下载最新 APK](https://github.com/donghuaigu123/QuickIDPhoto/releases/latest)** · **[项目仓库](https://github.com/donghuaigu123/QuickIDPhoto)**
+**[下载 Android APK](https://github.com/donghuaigu123/QuickIDPhoto/releases/latest)** · **[下载 Windows 版](https://github.com/donghuaigu123/QuickIDPhoto/releases/tag/v1.9.0-windows)** · **[项目仓库](https://github.com/donghuaigu123/QuickIDPhoto)**
 
 一款以**隐私、本地处理和专业构图**为核心的开源 Android 证件照工具。支持相册单张编辑、带完整设置与预览的多照片批量处理，以及带参考图样式人形定位轮廓的相机拍摄。
+
+## 🖥️ Windows 桌面版（v1.9.0）
+
+同一算法的 Windows 桌面程序，**相册/批量编辑、抠图换底、美颜调色、高清输出、排版照**等功能与 Android v1.9.0 完全一致，并针对电脑使用习惯优化：三栏布局、目录导入缩略图可视化勾选、导出目录自由选择、滚轮缩放/拖拽平移、快捷键与拖拽导入、后台线程渲染不卡顿。绿色便携、无需安装、**Win7 SP1 x64 及以上可用**。
+
+- 下载：`[快捷证件照-Windows-v1.9.0.zip](https://github.com/donghuaigu123/QuickIDPhoto/releases/download/v1.9.0-windows/%E5%BF%AB%E6%8D%B7%E8%AF%81%E4%BB%B6%E7%85%A7-Windows-v1.9.0.zip)`，解压后双击 `快捷证件照.exe`
+- 源码与详细说明：[`windows/`](windows/README.md)
+
 
 ## v1.9.0 更新（重要 · 用用户真实失败样图验证修复）
 
@@ -78,8 +86,8 @@
 
 ## 系统要求
 
-- Android 8.0（API 26）及以上
-- 推荐 Android 10 及以上
+- **Android 版**：Android 8.0（API 26）及以上，推荐 Android 10 及以上
+- **Windows 版**：Windows 7 SP1 x64 / 8 / 10 / 11（64 位），绿色便携无需安装
 - 抠图和人脸检测模型随应用提供，首次使用无需下载模型
 
 ## 本地构建
