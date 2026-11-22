@@ -82,6 +82,16 @@ def _auto_face_mask(rgb: np.ndarray, face) -> np.ndarray:
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kclose)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kopen)
 
+    # v2.6.0 健壮性兜底：肤色分割在极端曝光/偏色照片上可能得到极少前景，
+    # 若直接返回会导致美颜滑块再次"无效果"。仅当肤色掩码明显过小时，
+    # 才退回一个贴合脸框的柔和椭圆（正常照片仍走上面的自动脸型分割）。
+    roi_area = max(1.0, float((roi > 0).sum()))
+    if (mask > 0).sum() < 0.02 * roi_area:
+        yy, xx = np.mgrid[0:sh, 0:sw]
+        cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+        rx, ry = max(2.0, (x1 - x0) / 2.0 * 0.86), max(2.0, (y1 - y0) / 2.0 * 0.92)
+        mask = ((((xx - cx) / rx) ** 2 + ((yy - cy) / ry) ** 2) <= 1.0).astype(np.uint8)
+
     # 高斯羽化，边缘平滑过渡，杜绝硬边
     sigma = max(0.8, sw / 160.0)
     small_mask = cv2.GaussianBlur(mask * 255.0, (0, 0), sigma) / 255.0
@@ -170,8 +180,75 @@ class IdPhotoProcessor:
                         candidates.append((score, FaceBox(float(bx), float(by),
                                                           float(bx + fw), float(by + fh))))
         if not candidates:
-            return None
+            # v2.6.0 关键修复：Haar 级联对部分证件照（正脸偏小、光线均匀、
+            # 免冠近景等）会漏检，旧版直接返回 None，导致构图三滑块被
+            # calculate_crop 的居中分支忽略、美颜 mask 全 0——用户看到
+            # "智能构图和美颜精修所有滑块按钮都没效果"。这里用肤色分割 +
+            # 几何约束估算人脸区域作为回退，保证所有调节始终有作用对象。
+            return self.estimate_face_box(image)
         return max(candidates, key=lambda item: item[0])[1]
+
+    def estimate_face_box(self, image: np.ndarray):
+        """人脸检测失败时的回退：肤色分割（中上部 ROI）+ 几何约束估算脸框。
+
+        返回 FaceBox（原图坐标）；任何异常都退回到中上部几何估算，
+        保证永远不会返回 None，从而使构图/美颜滑块始终有作用对象。
+        """
+        h, w = image.shape[:2]
+        # 几何回退（肤色分割失败时的最终兜底）：证件照人脸居中偏上
+        fw_fallback = max(2.0, w * 0.44)
+        fh_fallback = fw_fallback * 1.25
+        cx0, cy0 = w * 0.5, h * 0.34
+        fallback = FaceBox(cx0 - fw_fallback / 2.0, cy0 - fh_fallback / 2.0,
+                           cx0 + fw_fallback / 2.0, cy0 + fh_fallback / 2.0)
+        if image is None or image.ndim != 3 or image.shape[2] < 3 or min(h, w) < 32:
+            return fallback
+        try:
+            ds = max(1.0, max(h, w) / 400.0)
+            sw, sh = max(2, int(w / ds)), max(2, int(h / ds))
+            small = cv2.resize(image, (sw, sh), interpolation=cv2.INTER_AREA)
+            r = small[:, :, 0].astype(np.float32)
+            g = small[:, :, 1].astype(np.float32)
+            b = small[:, :, 2].astype(np.float32)
+            yv = 0.299 * r + 0.587 * g + 0.114 * b
+            cb = 128.0 - 0.168736 * r - 0.331264 * g + 0.5 * b
+            cr = 128.0 + 0.5 * r - 0.418688 * g - 0.081312 * b
+            skin = ((cb >= 70) & (cb <= 150) & (cr >= 125) & (cr <= 185) &
+                    (yv > 50) & (yv < 250) & (r >= b + 2) & (r >= g - 4)).astype(np.uint8)
+            # 只在中上部找脸，排除手臂/背景等肤色干扰
+            roi = np.zeros_like(skin)
+            y0, y1 = int(sh * 0.05), max(int(sh * 0.05) + 2, int(sh * 0.68))
+            x0, x1 = int(sw * 0.08), max(int(sw * 0.08) + 2, int(sw * 0.92))
+            roi[y0:y1, x0:x1] = 1
+            skin *= roi
+            ks = max(3, int(15 / ds) | 1)
+            skin = cv2.morphologyEx(skin, cv2.MORPH_CLOSE,
+                                    cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ks, ks)))
+            n, labels, stats, cents = cv2.connectedComponentsWithStats(skin, 8)
+            best, best_score = None, 0.0
+            for i in range(1, n):
+                x, y, bw, bh, area = stats[i]
+                if area < 0.008 * sw * sh:
+                    continue
+                ar = bw / max(1.0, float(bh))
+                if not (0.45 <= ar <= 1.9):
+                    continue
+                cxp, cyp = cents[i]
+                score = area * (1.0 - abs(cxp - sw / 2.0) / sw) * \
+                        (1.0 - abs(cyp - sh * 0.35) / sh)
+                if score > best_score:
+                    best_score, best = score, (x, y, bw, bh)
+            if best is not None:
+                x, y, bw, bh = best
+                ex, ey = bw * 0.08, bh * 0.08
+                x, y = max(0, x - ex), max(0, y - ey)
+                bw = min(sw - x, bw + 2 * ex)
+                bh = min(sh - y, bh + 2 * ey)
+                if bw > 2 and bh > 2:
+                    return FaceBox(x * ds, y * ds, (x + bw) * ds, (y + bh) * ds)
+        except Exception:
+            pass
+        return fallback
 
     def transform(self, image: np.ndarray, rotation: float = 0.0, mirror: bool = False) -> np.ndarray:
         if rotation == 0 and not mirror:
@@ -203,6 +280,12 @@ class IdPhotoProcessor:
     # ---------- 主流程 ----------
     def render(self, source: np.ndarray, spec, settings, face, preview: bool = False) -> np.ndarray:
         sh, sw = source.shape[:2]
+        # v2.6.0 关键修复：face 为 None 时 calculate_crop 走居中分支，构图滑块
+        # （脸部占高/头顶留白/水平位置）被完全忽略；同时 face_in_crop 为 None
+        # 会让美颜 mask 全 0，导致所有美颜滑块与预设无效果。这里统一用回退脸框，
+        # 保证任何照片下构图与美颜调节都真实有效。
+        if face is None or face.width <= 0 or face.height <= 0:
+            face = self.estimate_face_box(source)
         crop = calculate_crop(sw, sh, spec.aspect, face, settings.face_scale,
                               settings.head_top_margin, settings.horizontal_offset)
         left = max(0, min(int(round(crop.left)), sw - 1))

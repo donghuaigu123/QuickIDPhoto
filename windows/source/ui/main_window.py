@@ -18,7 +18,7 @@ from .widgets import SliderRow, ChipGroup, DirectoryRow, PreviewPane
 from .pickers import FolderPhotoPicker
 from .workers import RenderWorker, BatchWorker, PrintSheetWorker, SaveCurrentWorker
 
-VERSION = "v2.5.0"
+VERSION = "v2.6.0"
 
 
 class MainWindow(QMainWindow):
@@ -325,7 +325,23 @@ class MainWindow(QMainWindow):
         layout.addWidget(presets)
 
         layout.addWidget(section_label("手动微调"))
-        self.add_slider(layout, "beauty_intensity", "美颜总强度", 0, 100, self.editor.beauty_intensity, "%")
+        intensity_slider = self.add_slider(layout, "beauty_intensity", "美颜总强度", 0, 100,
+                                           self.editor.beauty_intensity, "%")
+        # v2.6.0：单独拖动"美颜总强度"时，若皮肤平滑/提亮/红润全为 0，
+        # 引擎会因无基础美颜参数而早退，用户看到"总强度滑块不起作用"。
+        # 这里在拖动总强度时自动补一组温和的基础值，保证该滑块始终有效；
+        # 不影响默认状态（用户不动滑块时子参数仍为 0，不做任何美化）。
+        intensity_changed = intensity_slider.on_changed
+
+        def on_intensity(v):
+            if v > 0 and self.editor.smooth == 0 and self.editor.whiten == 0 and self.editor.rosy == 0:
+                self.editor.smooth = 30
+                self.editor.whiten = 15
+                self.editor.rosy = 10
+                for key in ("smooth", "whiten", "rosy"):
+                    self.sliders[key].set_value(getattr(self.editor, key))
+            intensity_changed(v)
+        intensity_slider.on_changed = on_intensity
         self.add_slider(layout, "smooth", "皮肤平滑", 0, 100, self.editor.smooth)
         self.add_slider(layout, "whiten", "肤色提亮", 0, 100, self.editor.whiten)
         self.add_slider(layout, "rosy", "气色红润", 0, 100, self.editor.rosy)
